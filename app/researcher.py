@@ -1,8 +1,11 @@
 """Researcher (brief section 8): background web research, written to the fact store.
 
-Step 3 covers one research job: real competitors and their current prices, used
-by question 15 (which competitor is closest) and question 17 (what to charge).
-Market size, demand signals, costs and regulations are added in later steps.
+Two research jobs run side by side once the idea is described:
+  competitors - real competitors, their prices and their claims. Used by
+                question 15 (which is closest) and question 17 (what to charge).
+  market      - market size and direction, demand signals, typical costs, how
+                long customers keep buying, and rules or licences that apply.
+The Checker compares the person's answers against both.
 
 Research rules, from the brief, and where they are enforced:
   - Every number traces to a source, or is tagged as an estimate with the
@@ -192,6 +195,19 @@ def to_facts(competitors: List[dict], rng: Optional[dict]) -> List[dict]:
     today = date.today().isoformat()
     facts = []
     for c in competitors:
+        if c["pitch"] and c["source_url"]:
+            facts.append({
+                "job": JOB,
+                "topic": "competitor_claim",
+                "claim": "%s is sold as: %s" % (_label(c), c["pitch"]),
+                "value": None,
+                "unit": None,
+                "tag": "verified",
+                "reasoning": None,
+                "source_url": c["source_url"],
+                "source_name": c["source_name"],
+                "found_on": today,
+            })
         if c["price"] is None:
             continue
         size = ""
@@ -227,17 +243,20 @@ def to_facts(competitors: List[dict], rng: Optional[dict]) -> List[dict]:
             "source_name": ", ".join(rng["sources"]),
             "found_on": today,
         })
+    return _number(facts, "C")
+
+
+def _number(facts: List[dict], prefix: str) -> List[dict]:
+    """Give each fact a short id the Checker can cite, e.g. C3 or M5."""
+    for i, f in enumerate(facts, 1):
+        f["id"] = "%s%d" % (prefix, i)
     return facts
 
 
-# ---------- the research job ----------
+# ---------- the research jobs ----------
 
-def run(session: dict) -> Optional[dict]:
-    """Research competitors and prices. Logs usage on `session`; returns the results or None."""
-    idea = idea_text(session)
-    if not idea:
-        return None
-    lines = ["The idea: " + idea]
+def _context(session: dict) -> List[str]:
+    lines = ["The idea: " + idea_text(session)]
     for qid, label in (("q2", "Where it will run"), ("q14", "Competitors the person named"),
                        ("q10", "Who buys it")):
         value = _answer(session, qid)
@@ -245,8 +264,14 @@ def run(session: dict) -> Optional[dict]:
             lines.append("%s: %s" % (label, value))
     if session.get("business_type"):
         lines.append("Business type: " + session["business_type"].replace("_", " "))
+    return lines
 
-    found = ai.call(session, "research:" + JOB, SYSTEM, "\n".join(lines), Findings,
+
+def run(session: dict) -> Optional[dict]:
+    """Research competitors and prices. Logs usage on `session`; returns the results or None."""
+    if not idea_text(session):
+        return None
+    found = ai.call(session, "research:" + JOB, SYSTEM, "\n".join(_context(session)), Findings,
                     max_tokens=16000, timeout=420.0, effort="medium", web=True)
     if found is None:
         return None
@@ -258,3 +283,98 @@ def run(session: dict) -> Optional[dict]:
         "market_note": (found.market_note or "").strip() or None,
         "facts": to_facts(competitors, rng),
     }
+
+
+# ---------- market, demand, costs, rules ----------
+
+MARKET_JOB = "market"
+
+MARKET_TOPICS = ("market_size", "market_direction", "demand_signal", "unit_cost", "selling_cost",
+                 "customer_cost", "repeat_and_lifetime", "regulation")
+
+
+class MarketFact(BaseModel):
+    topic: Literal["market_size", "market_direction", "demand_signal", "unit_cost", "selling_cost",
+                   "customer_cost", "repeat_and_lifetime", "regulation"]
+    claim: str
+    value: Optional[float] = None
+    unit: Optional[str] = None
+    source_url: Optional[str] = None
+    source_name: Optional[str] = None
+    tag: Literal["verified", "estimated"] = "estimated"
+    reasoning: Optional[str] = None
+
+
+class MarketFindings(BaseModel):
+    facts: List[MarketFact]
+    market_note: Optional[str] = None
+
+
+MARKET_SYSTEM = """You are the Researcher for a business-idea checker. Search the web for \
+the facts a careful advisor would check before backing the idea below, in the place the \
+person will run it. Search for every one of these topics and give one to three facts on \
+each; leave a topic out only if you searched and found nothing usable:
+
+market_size: how many customers there are, or how much is spent in this category.
+market_direction: whether the customer group or category is growing or shrinking.
+demand_signal: evidence people already spend money or effort on this problem (sales \
+volumes, review counts, search interest, waiting lists).
+unit_cost: what one unit or one delivery typically costs to make, buy in, or provide.
+selling_cost: fees and costs per sale in the main channels (marketplace commission, \
+payment, shipping, returns).
+customer_cost: what it typically costs to win one customer (ad cost per click or per sale).
+repeat_and_lifetime: how often customers buy again, and how long they stay a customer, \
+including any natural point where they stop needing it (for example outgrowing it, \
+finishing a course, or a one-time need).
+regulation: licences, standards, labelling or advertising-claim rules that apply.
+
+Each fact is one plain sentence in claim, with the number, if any, in value and its unit \
+in unit (for example INR, %, months, INR crore). Give the source page URL for every fact. \
+Tag a fact "verified" only when you read it on that page. If you had to work it out or \
+take it from a nearby market, tag it "estimated" and show how in reasoning. Never make up \
+a number, a URL or a source; leave a topic out rather than guess without a basis.
+
+If there is little local data, use the closest comparable market, and say which one and \
+why in market_note. Otherwise leave market_note empty."""
+
+
+def _clean_market(found: MarketFindings) -> List[dict]:
+    today = date.today().isoformat()
+    facts, seen = [], set()
+    for f in found.facts:
+        claim = f.claim.strip()
+        url = (f.source_url or "").strip()
+        has_source = url.startswith(("http://", "https://"))
+        reasoning = (f.reasoning or "").strip() or None
+        tag = f.tag
+        if not has_source:
+            if not reasoning:
+                continue          # no source and no reasoning shown: not allowed
+            tag = "estimated"
+        if not claim or claim.lower() in seen:
+            continue
+        seen.add(claim.lower())
+        facts.append({
+            "job": MARKET_JOB,
+            "topic": f.topic,
+            "claim": claim,
+            "value": f.value,
+            "unit": (f.unit or "").strip() or None,
+            "tag": tag,
+            "reasoning": reasoning,
+            "source_url": url if has_source else None,
+            "source_name": (f.source_name or "").strip() or (_domain(url) if has_source else None),
+            "found_on": today,
+        })
+    return _number(facts, "M")
+
+
+def run_market(session: dict) -> Optional[dict]:
+    """Research the market, costs and rules. Logs usage on `session`; returns the results or None."""
+    if not idea_text(session):
+        return None
+    found = ai.call(session, "research:" + MARKET_JOB, MARKET_SYSTEM, "\n".join(_context(session)),
+                    MarketFindings, max_tokens=16000, timeout=420.0, effort="medium", web=True)
+    if found is None:
+        return None
+    return {"market_note": (found.market_note or "").strip() or None, "facts": _clean_market(found)}

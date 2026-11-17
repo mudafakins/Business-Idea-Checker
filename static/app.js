@@ -14,6 +14,9 @@ const state = {
   view: "question",   // "question" | "followup" | "done"
   followUp: null,     // { id, text } while a follow-up is on screen
   returnToDone: false,
+  returnToIndex: null, // where to go back to after changing an answer from an alert
+  alerts: [],
+  checking: false,
 };
 
 const main = document.getElementById("main");
@@ -257,6 +260,7 @@ function renderQuestion() {
       if (slow) showWorking("Reading your idea…");
       const result = await api("PUT", `/api/sessions/${state.session.id}/answers/${q.id}`, answer);
       state.session = result.session;
+      startAlertWatch();
       await advance();
     } catch (err) {
       if (!main.querySelector(".error")) render();
@@ -345,6 +349,11 @@ function renderQuestion() {
   const actions = el("div", { class: "actions" });
   if (state.returnToDone) {
     actions.append(el("button", { class: "btn plain", type: "button", onclick: showDone }, "Cancel"));
+  } else if (state.returnToIndex !== null) {
+    actions.append(el("button", {
+      class: "btn plain", type: "button",
+      onclick: () => { state.index = state.returnToIndex; state.returnToIndex = null; render(); },
+    }, "Cancel"));
   } else if (previousIndex() !== -1) {
     actions.append(el("button", {
       class: "btn plain", type: "button",
@@ -484,6 +493,12 @@ async function advance(afterFollowUp) {
     return render();
   }
   if (state.returnToDone) return showDone();
+  if (state.returnToIndex !== null) {
+    state.index = state.returnToIndex;
+    state.returnToIndex = null;
+    state.view = "question";
+    return render();
+  }
   const current = state.questions[state.index];
   const stay = afterFollowUp && !answers()[current.id];
   const i = stay ? state.index : nextIndex();
@@ -546,6 +561,14 @@ function showDone() {
     screen.append(el("div", { class: "section-title" }, stage.name), list);
   }
 
+  const open = openAlerts();
+  if (open.length) {
+    screen.append(el("div", { class: "section-title" }, "Alerts"));
+    const list = el("div", { class: "alert-list" });
+    for (const alert of open) list.append(alertCard(alert));
+    screen.append(list);
+  }
+
   const r = research();
   if (r.status !== "none") {
     screen.append(el("div", { class: "section-title" }, "Research"));
@@ -579,6 +602,9 @@ function showDone() {
         onclick: () => {
           localStorage.removeItem(STORAGE_KEY);
           state.session = null;
+          state.alerts = [];
+          state.checking = false;
+          updateAlertButton();
           state.index = 0;
           state.view = "question";
           render();
@@ -587,6 +613,144 @@ function showDone() {
 
   main.replaceChildren(screen);
   window.scrollTo(0, 0);
+}
+
+// ---------- alerts ----------
+//
+// A small button in the corner, always visible. The Checker runs on the server
+// in the background; the button picks up its results by polling.
+
+let alertTimer = null;
+const alertButton = el("button", { class: "alert-button", type: "button", onclick: () => showAlerts() });
+document.body.append(alertButton);
+
+function openAlerts() {
+  return state.alerts.filter((a) => a.status === "open");
+}
+
+function updateAlertButton() {
+  const open = openAlerts();
+  const red = open.some((a) => a.severity === "red");
+  alertButton.className = "alert-button" + (open.length ? (red ? " red" : " amber") : "");
+  const label = open.length
+    ? `${open.length} alert${open.length === 1 ? "" : "s"}`
+    : state.checking ? "Checking" : "No alerts";
+  alertButton.replaceChildren(
+    state.checking ? el("span", { class: "spinner tiny", "aria-hidden": "true" })
+                   : el("span", { class: "alert-dot", "aria-hidden": "true" }),
+    el("span", {}, label));
+  alertButton.setAttribute("aria-label", open.length
+    ? `${label}${red ? ", including a serious problem" : ""}. Open the list.`
+    : `${label}. Open the list.`);
+}
+
+async function refreshAlerts() {
+  if (!state.session) return;
+  try {
+    const data = await api("GET", `/api/sessions/${state.session.id}/alerts`);
+    state.alerts = data.alerts;
+    state.checking = data.checking;
+    updateAlertButton();
+    if (state.view === "done" && !document.querySelector(".sheet")) {
+      const shown = main.querySelectorAll(".alert-card").length;
+      if (shown !== openAlerts().length) showDone();
+    }
+  } catch (err) { /* try again on the next tick */ }
+}
+
+function startAlertWatch() {
+  if (alertTimer || !state.session) return;
+  refreshAlerts();
+  alertTimer = setInterval(refreshAlerts, 4000);
+}
+
+function changeAnswer(questionId) {
+  closeAlerts();
+  const index = state.questions.findIndex((q) => q.id === questionId);
+  if (index === -1) return;
+  if (state.view === "done") {
+    state.returnToDone = true;
+  } else if (state.view === "question" && state.index !== index) {
+    state.returnToIndex = state.index;
+  }
+  state.index = index;
+  state.view = "question";
+  render();
+}
+
+function alertCard(alert) {
+  const card = el("div", { class: "alert-card " + alert.severity },
+    el("div", { class: "alert-head" },
+      el("span", { class: "pill " + alert.severity }, alert.severity === "red" ? "Serious" : "Concern"),
+      el("span", { class: "alert-about" }, alert.question)),
+    el("div", { class: "alert-label" }, "You said"),
+    el("div", { class: "alert-text" }, alert.you_said),
+    el("div", { class: "alert-label" }, "The data says"),
+    el("div", { class: "alert-text" }, alert.data_says),
+    el("div", { class: "alert-label" }, "Suggested change"),
+    el("div", { class: "alert-text" }, alert.suggestion));
+  const sources = alert.sources || [];
+  if (sources.length) {
+    card.append(el("div", { class: "alert-label" }, "Source"));
+    for (const src of sources) {
+      const name = src.name || "Research";
+      card.append(el("div", { class: "alert-source" },
+        src.url ? el("a", { href: src.url, target: "_blank", rel: "noopener noreferrer" }, name)
+                : el("span", {}, name),
+        src.tag === "estimated" ? el("span", { class: "tag" }, " · estimate") : null));
+    }
+  } else {
+    card.append(el("div", { class: "alert-label" }, "Source"),
+      el("div", { class: "alert-source" }, "Your own answers"));
+  }
+  card.append(el("div", { class: "alert-actions" },
+    el("button", { class: "link", type: "button", onclick: () => changeAnswer(alert.question_id) },
+      "Change my answer")));
+  return card;
+}
+
+function closeAlerts() {
+  const overlay = document.querySelector(".overlay");
+  if (overlay) overlay.remove();
+  document.removeEventListener("keydown", onAlertKey);
+  alertButton.focus({ preventScroll: true });
+}
+
+function onAlertKey(e) {
+  if (e.key === "Escape") closeAlerts();
+}
+
+function showAlerts() {
+  closeAlerts();
+  const open = openAlerts();
+  const close = el("button", { class: "btn plain", type: "button", onclick: closeAlerts }, "Close");
+  const body = el("div", { class: "sheet-body" });
+  if (open.length) {
+    body.append(el("p", { class: "hint" },
+      "These don't stop you. Change an answer, or carry on; they will all be listed in your report."));
+    for (const alert of open) body.append(alertCard(alert));
+  } else {
+    body.append(el("p", { class: "hint" }, state.checking
+      ? "Checking your answers against the research…"
+      : "Nothing conflicts with the research so far. As you answer, anything that does will show here."));
+  }
+  const overlay = el("div", {
+    class: "overlay",
+    onclick: (e) => { if (e.target === overlay) closeAlerts(); },
+  },
+    el("div", { class: "sheet", role: "dialog", "aria-modal": "true", "aria-label": "Alerts" },
+      el("div", { class: "sheet-head" }, el("h2", {}, "Alerts"), close),
+      body));
+  document.body.append(overlay);
+  document.addEventListener("keydown", onAlertKey);
+  close.focus();
+
+  const unseen = open.filter((a) => !a.seen).map((a) => a.key);
+  if (unseen.length && state.session) {
+    api("POST", `/api/sessions/${state.session.id}/alerts/seen`, { keys: unseen })
+      .then((data) => { state.alerts = data.alerts; })
+      .catch(() => {});
+  }
 }
 
 // ---------- start ----------
@@ -623,7 +787,10 @@ async function start() {
       state.view = "followup";
       if (firstOpen === -1) state.index = state.questions.length - 1;
     }
+    state.alerts = state.session.alerts || [];
+    startAlertWatch();
   }
+  updateAlertButton();
   render();
 }
 
