@@ -4,3 +4,4 @@ __pycache__/
 reports/*
 !reports/.gitkeep
 .DS_Store
+tests/results-*.json
