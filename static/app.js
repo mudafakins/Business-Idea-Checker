@@ -99,7 +99,8 @@ function money(amount, currency) {
   try {
     return new Intl.NumberFormat(undefined, {
       style: "currency", currency: currency || "USD",
-      maximumFractionDigits: amount % 1 === 0 ? 0 : 2,
+      // Whole numbers for anything over 100; pennies only matter on small prices.
+      maximumFractionDigits: amount % 1 === 0 || amount >= 100 ? 0 : 2,
     }).format(amount);
   } catch (err) {
     return `${currency || ""} ${amount}`.trim();

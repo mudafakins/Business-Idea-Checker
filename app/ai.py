@@ -66,18 +66,22 @@ def _api_client() -> anthropic.Anthropic:
 
 
 def record(session: dict, purpose: str, model: str, tokens_in: int, tokens_out: int,
-           searches: int, started: float) -> None:
+           searches: int, started: float, cost_usd: Optional[float] = None) -> None:
+    """Log one AI call. cost_usd is the cost at API list prices, when known."""
     usage = session.setdefault("usage", {"calls": 0, "input_tokens": 0, "output_tokens": 0, "searches": 0, "log": []})
     usage["calls"] += 1
     usage["input_tokens"] += tokens_in
     usage["output_tokens"] += tokens_out
     usage["searches"] = usage.get("searches", 0) + searches
+    if cost_usd is not None:
+        usage["cost_usd"] = round(usage.get("cost_usd", 0) + cost_usd, 4)
     usage["log"].append({
         "purpose": purpose,
         "model": model,
         "input_tokens": tokens_in,
         "output_tokens": tokens_out,
         "searches": searches,
+        "cost_usd": round(cost_usd, 4) if cost_usd is not None else None,
         "seconds": round(time.time() - started, 1),
     })
 
@@ -191,9 +195,20 @@ def _call_cli(session, purpose, system, user, schema, timeout, effort, web):
         log.error("%s: %s", purpose, message)
         return None
 
-    usage = data.get("usage") or {}
-    tokens_in = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
-    searches = (usage.get("server_tool_use") or {}).get("web_search_requests") or 0
-    record(session, purpose, "+".join(data.get("modelUsage") or {}) or CLI_MODEL,
-           tokens_in, usage.get("output_tokens") or 0, searches, started)
+    # Per-model totals include the helper model the tool uses for web searches.
+    per_model = data.get("modelUsage") or {}
+    if per_model:
+        tokens_in = sum((m.get("inputTokens") or 0) + (m.get("cacheReadInputTokens") or 0)
+                        + (m.get("cacheCreationInputTokens") or 0) for m in per_model.values())
+        tokens_out = sum(m.get("outputTokens") or 0 for m in per_model.values())
+        searches = sum(m.get("webSearchRequests") or 0 for m in per_model.values())
+        cost = sum(m.get("costUSD") or 0 for m in per_model.values())
+    else:
+        usage = data.get("usage") or {}
+        tokens_in = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        tokens_out = usage.get("output_tokens") or 0
+        searches = (usage.get("server_tool_use") or {}).get("web_search_requests") or 0
+        cost = data.get("total_cost_usd")
+    record(session, purpose, "+".join(per_model) or CLI_MODEL,
+           tokens_in, tokens_out, searches, started, cost)
     return _parse(purpose, data.get("result") or "", schema)

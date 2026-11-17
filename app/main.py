@@ -149,6 +149,8 @@ def merge_usage(session: dict, snapshot: dict, calls_before: int) -> None:
         usage["input_tokens"] += call["input_tokens"]
         usage["output_tokens"] += call["output_tokens"]
         usage["searches"] = usage.get("searches", 0) + call.get("searches", 0)
+        if call.get("cost_usd") is not None:
+            usage["cost_usd"] = round(usage.get("cost_usd", 0) + call["cost_usd"], 4)
         usage["log"].append(call)
 
 

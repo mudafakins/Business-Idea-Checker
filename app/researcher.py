@@ -71,6 +71,10 @@ only when you saw it on that page. If you could only infer it (an old article, a
 different pack), tag it "estimated" and say how you got it in note. If you could not find a \
 price at all, leave price empty. Never make up a number, a URL or a brand.
 
+Every competitor, substitutes included, must be a real, named brand and product that a \
+customer could buy, never a category such as "regular detergent"; for a substitute, name \
+its best-selling brand.
+
 pitch: the main claim the competitor makes, in a few words (for example "plant-based, \
 dermatologically tested"). kind: direct or substitute.
 
