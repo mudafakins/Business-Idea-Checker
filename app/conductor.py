@@ -10,68 +10,20 @@ Two calls:
              rewords every remaining question.
   review() - after each free-text answer: decides on a follow-up and on skips.
 
-The AI runs one of two ways:
-  - through the Claude API, when ANTHROPIC_API_KEY is set in .env
-  - otherwise through the Claude Code command-line tool, which uses the Claude
-    subscription the owner is logged in with (no key, local use only)
-
-If neither is available, or a call fails or times out, both calls return None
-and the form carries on with the fixed questions.
+If the AI is unavailable, or a call fails or times out (see ai.py), both calls
+return None and the form carries on with the fixed questions.
 """
 
-import json
-import logging
-import os
-import shutil
-import subprocess
-import tempfile
-import time
 from typing import List, Optional
 
-import anthropic
 from pydantic import BaseModel
 from typing_extensions import Literal
 
+from . import ai
 from .questions import QUESTIONS, QUESTIONS_BY_ID
 
-log = logging.getLogger("conductor")
-
-MODEL = os.environ.get("CONDUCTOR_MODEL") or "claude-opus-5-5"
-CLI_MODEL = os.environ.get("CONDUCTOR_CLI_MODEL") or "claude-sonnet-5-5"
 IDEA_QUESTION = "q8"
-
-# Server-side refusal fallback is only offered on these model families.
-_FALLBACK_PREFIXES = ("claude-opus-5", "claude-fable-5", "claude-mythos-5")
-
-_client: Optional[anthropic.Anthropic] = None
-
-
-def _cli_path() -> Optional[str]:
-    found = shutil.which("claude")
-    if found:
-        return found
-    fallback = os.path.expanduser("~/.local/bin/claude")
-    return fallback if os.access(fallback, os.X_OK) else None
-
-
-def backend() -> Optional[str]:
-    """"api", "cli", or None when no AI is available."""
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "api"
-    if _cli_path():
-        return "cli"
-    return None
-
-
-def enabled() -> bool:
-    return backend() is not None
-
-
-def client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic()
-    return _client
+enabled = ai.enabled
 
 
 # ---------- output shapes ----------
@@ -187,113 +139,8 @@ def _describe(questions: List[dict], session: dict) -> str:
     return "\n".join(lines)
 
 
-def _record(session: dict, purpose: str, model: str, tokens_in: int, tokens_out: int, started: float) -> None:
-    usage = session.setdefault("usage", {"calls": 0, "input_tokens": 0, "output_tokens": 0, "searches": 0, "log": []})
-    usage["calls"] += 1
-    usage["input_tokens"] += tokens_in
-    usage["output_tokens"] += tokens_out
-    usage["log"].append({
-        "purpose": purpose,
-        "model": model,
-        "input_tokens": tokens_in,
-        "output_tokens": tokens_out,
-        "seconds": round(time.time() - started, 1),
-    })
-
-
-def _call(session: dict, purpose: str, system: str, user: str, schema, max_tokens: int, timeout: float):
-    if backend() == "api":
-        return _call_api(session, purpose, system, user, schema, max_tokens, timeout)
-    return _call_cli(session, purpose, system, user, schema, timeout)
-
-
-def _call_api(session: dict, purpose: str, system: str, user: str, schema, max_tokens: int, timeout: float):
-    kwargs = dict(
-        model=MODEL,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        output_format=schema,
-        output_config={"effort": "low"},
-    )
-    if MODEL.startswith(_FALLBACK_PREFIXES):
-        kwargs["betas"] = ["server-side-fallback-2026-07-01"]
-        kwargs["fallbacks"] = "default"
-    started = time.time()
-    try:
-        response = client().with_options(timeout=timeout, max_retries=0).beta.messages.parse(**kwargs)
-    except anthropic.AuthenticationError:
-        log.error("%s: the API key was rejected. Check ANTHROPIC_API_KEY in .env", purpose)
-        return None
-    except anthropic.APITimeoutError:
-        log.warning("%s: timed out after %.0fs, continuing without it", purpose, timeout)
-        return None
-    except anthropic.APIStatusError as e:
-        log.error("%s: API error %s: %s", purpose, e.status_code, e.message)
-        return None
-    except anthropic.APIConnectionError:
-        log.error("%s: could not reach the API", purpose)
-        return None
-
-    _record(session, purpose, response.model, response.usage.input_tokens, response.usage.output_tokens, started)
-    if response.stop_reason != "end_turn" or response.parsed_output is None:
-        log.warning("%s: no usable result (stop_reason=%s)", purpose, response.stop_reason)
-        return None
-    return response.parsed_output
-
-
-# The command-line tool's own --json-schema option hangs when it is not logged
-# in, so the shape is requested in the prompt and checked here instead.
-_JSON_ONLY = "\n\nReply with one JSON object and nothing else. It must match this JSON Schema:\n"
-
-
-def _call_cli(session: dict, purpose: str, system: str, user: str, schema, timeout: float):
-    """One call through the Claude Code command-line tool (uses the Claude subscription)."""
-    cmd = [
-        _cli_path(), "-p", user,
-        "--output-format", "json",
-        "--model", CLI_MODEL,
-        "--effort", "low",
-        "--system-prompt", system + _JSON_ONLY + json.dumps(schema.model_json_schema()),
-        "--no-session-persistence",
-        "--disable-slash-commands",
-        "--strict-mcp-config",
-        "--tools", "",
-    ]
-    # A clean environment: no project settings, and nothing inherited from a
-    # Claude session that may have started this server.
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC"))}
-    started = time.time()
-    try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                              env=env, cwd=tempfile.gettempdir(), stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        log.warning("%s: timed out after %.0fs, continuing without it", purpose, timeout)
-        return None
-    try:
-        data = json.loads(done.stdout)
-    except ValueError:
-        log.error("%s: unreadable reply from the claude command: %s", purpose, (done.stdout or done.stderr)[:300])
-        return None
-    if data.get("is_error"):
-        message = str(data.get("result"))
-        if "Not logged in" in message:
-            message = "the claude command is not logged in. Run `claude` in Terminal and type /login"
-        log.error("%s: %s", purpose, message)
-        return None
-
-    usage = data.get("usage") or {}
-    tokens_in = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
-    _record(session, purpose, "+".join(data.get("modelUsage") or {}) or CLI_MODEL,
-            tokens_in, usage.get("output_tokens") or 0, started)
-
-    text = data.get("result") or ""
-    try:
-        # Tolerate a code fence or stray words around the JSON object.
-        return schema.model_validate(json.loads(text[text.index("{"):text.rindex("}") + 1]))
-    except ValueError as e:
-        log.warning("%s: reply did not match the expected shape: %s", purpose, str(e)[:300])
-        return None
+def _call(session, purpose, system, user, schema, max_tokens, timeout):
+    return ai.call(session, purpose, system, user, schema, max_tokens=max_tokens, timeout=timeout)
 
 
 def _apply_skips(session: dict, skips: List[Skip], allowed: List[dict]) -> None:

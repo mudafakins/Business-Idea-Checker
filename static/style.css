@@ -243,3 +243,25 @@ button.btn {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Research panel on questions 15 and 17 */
+.note.research { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.note.research.done { display: block; color: var(--text); }
+.market-note { margin-top: 8px; color: var(--secondary); font-size: 14px; }
+.spinner.small { width: 14px; height: 14px; border-width: 2px; flex: none; }
+
+.sources { margin-top: 12px; font-size: 13px; color: var(--secondary); }
+.sources-title { font-weight: 600; margin-bottom: 4px; }
+.sources a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+.sources a:hover { text-decoration: underline; }
+.list + .sources { margin: 12px 0 0 16px; }
+
+button.link {
+  border: 0; background: none; padding: 0;
+  font: inherit; color: var(--accent); cursor: pointer;
+}
+
+.row.static { cursor: default; }
+.row.static:hover { background: none; }
+a.edit { text-decoration: none; flex: none; }
+.lead.small { font-size: 14px; margin: 10px 16px 0; }

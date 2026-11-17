@@ -1,4 +1,4 @@
-"""Business Idea Checker - local server. The form, saved answers and the Conductor."""
+"""Business Idea Checker - local server. The form, saved answers, the Conductor and the Researcher."""
 
 import json
 import logging
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-from . import conductor  # noqa: E402  (needs the environment loaded first)
+from . import conductor, researcher  # noqa: E402  (need the environment loaded first)
 from .questions import QUESTIONS, QUESTIONS_BY_ID, STAGES  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -91,7 +91,10 @@ def create_session():
 
 @app.get("/api/sessions/{session_id}")
 def get_session(session_id: str):
-    return load(session_id)
+    session = load(session_id)
+    if session.get("research"):
+        session["research"] = research_status(session)
+    return session
 
 
 def shown_text(session: dict, question: dict) -> str:
@@ -130,16 +133,96 @@ def run_conductor(session_id: str, question_id: str, work) -> dict:
         current = session["answers"].get(question_id)
         if follow_up and current and current.get("answered_at") == answered_at and not current.get("follow_up"):
             current["follow_up"] = {"question": follow_up, "answer": None, "status": "pending"}
-        new_calls = snapshot.get("usage", {}).get("log", [])[calls_before:]
-        if new_calls:
-            usage = session.setdefault("usage", {"calls": 0, "input_tokens": 0, "output_tokens": 0, "searches": 0, "log": []})
-            for call in new_calls:
-                usage["calls"] += 1
-                usage["input_tokens"] += call["input_tokens"]
-                usage["output_tokens"] += call["output_tokens"]
-                usage["log"].append(call)
+        merge_usage(session, snapshot, calls_before)
         save(session)
         return session
+
+
+def merge_usage(session: dict, snapshot: dict, calls_before: int) -> None:
+    """Copy the AI calls logged on a snapshot into the latest saved session."""
+    new_calls = snapshot.get("usage", {}).get("log", [])[calls_before:]
+    if not new_calls:
+        return
+    usage = session.setdefault("usage", {"calls": 0, "input_tokens": 0, "output_tokens": 0, "searches": 0, "log": []})
+    for call in new_calls:
+        usage["calls"] += 1
+        usage["input_tokens"] += call["input_tokens"]
+        usage["output_tokens"] += call["output_tokens"]
+        usage["searches"] = usage.get("searches", 0) + call.get("searches", 0)
+        usage["log"].append(call)
+
+
+# ---------- background research ----------
+
+_research = {}   # session id -> the research thread running in this server
+
+
+def start_research(session_id: str, force: bool = False) -> None:
+    """Start the competitor research unless it is already running or done for this idea."""
+    with _locks[session_id]:
+        session = load(session_id)
+        idea = researcher.idea_text(session)
+        current = session.get("research") or {}
+        running = _research.get(session_id)
+        if not idea or not conductor.enabled():
+            return
+        if current.get("idea") == idea and not force:
+            if current.get("status") == "done" or (running and running.is_alive()):
+                return
+        if force and running and running.is_alive() and current.get("idea") == idea:
+            return
+        session["research"] = {"status": "running", "idea": idea, "started_at": now()}
+        save(session)
+        snapshot = json.loads(json.dumps(session))
+
+    def job():
+        calls_before = len(snapshot.get("usage", {}).get("log", []))
+        try:
+            result = researcher.run(snapshot)
+        except Exception:
+            logging.getLogger("researcher").exception("research failed")
+            result = None
+        with _locks[session_id]:
+            session = load(session_id)
+            merge_usage(session, snapshot, calls_before)
+            research = session.get("research") or {}
+            if research.get("idea") == idea:   # the idea has not been changed since
+                research["finished_at"] = now()
+                if result is None:
+                    research["status"] = "failed"
+                else:
+                    research.update(status="done", competitors=result["competitors"],
+                                    price_range=result["price_range"], market_note=result["market_note"])
+                    others = [f for f in session.get("facts", []) if f.get("job") != researcher.JOB]
+                    session["facts"] = others + result["facts"]
+                session["research"] = research
+            save(session)
+
+    thread = threading.Thread(target=job, daemon=True)
+    _research[session_id] = thread
+    thread.start()
+
+
+def research_status(session: dict) -> dict:
+    research = session.get("research") or {"status": "none"}
+    # Research that was running when the app was restarted will never finish.
+    if research.get("status") == "running":
+        thread = _research.get(session["id"])
+        if not (thread and thread.is_alive()):
+            research = dict(research, status="failed")
+    return research
+
+
+@app.get("/api/sessions/{session_id}/research")
+def get_research(session_id: str):
+    return research_status(load(session_id))
+
+
+@app.post("/api/sessions/{session_id}/research")
+def retry_research(session_id: str):
+    load(session_id)
+    start_research(session_id, force=True)
+    return research_status(load(session_id))
 
 
 def run_in_background(session_id: str, question_id: str, work) -> None:
@@ -185,6 +268,8 @@ def put_answer(session_id: str, question_id: str, answer: Answer):
             # The next questions depend on this, so the form waits for it.
             session = run_conductor(session_id, question_id,
                                     lambda snap: conductor.plan(snap, allow_follow_up=True))
+            if not (session["answers"][question_id].get("follow_up") or {}).get("status") == "pending":
+                start_research(session_id)
         elif question["type"] in ("text", "long"):
             # Vagueness check and skips: the form does not wait.
             run_in_background(session_id, question_id,
@@ -206,6 +291,9 @@ def put_follow_up(session_id: str, question_id: str, body: FollowUpAnswer):
     if question_id == conductor.IDEA_QUESTION and answer["follow_up"]["answer"] and conductor.enabled():
         session = run_conductor(session_id, question_id,
                                 lambda snap: conductor.plan(snap, allow_follow_up=False))
+    if question_id == conductor.IDEA_QUESTION:
+        start_research(session_id)
+        session = load(session_id)
     return {"session": session}
 
 

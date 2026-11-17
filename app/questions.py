@@ -111,7 +111,7 @@ QUESTIONS = [
     {
         "id": "q15", "stage": 4, "type": "text", "no_skip": True,
         "text": "Which competitor is closest to what you want to be?",
-        "note": "Competitors found by research, with prices, will be listed here from step 3.",
+        "research": "competitors",
     },
     {
         "id": "q16", "stage": 4, "type": "long",
@@ -122,7 +122,7 @@ QUESTIONS = [
         "id": "q17", "stage": 5, "type": "text",
         "text": "What will you charge?",
         "placeholder": "Price and currency",
-        "note": "The competitor price range will be shown here from step 3.",
+        "research": "prices",
     },
     {
         "id": "q18", "stage": 5, "type": "multi", "adapt_options": True,

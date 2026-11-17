@@ -86,11 +86,139 @@ function showWorking(message) {
     el("p", {}, message)));
 }
 
+// ---------- research (competitors and prices) ----------
+
+let pollTimer = null;
+
+function research() {
+  return (state.session && state.session.research) || { status: "none" };
+}
+
+function money(amount, currency) {
+  if (amount == null) return "";
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency", currency: currency || "USD",
+      maximumFractionDigits: amount % 1 === 0 ? 0 : 2,
+    }).format(amount);
+  } catch (err) {
+    return `${currency || ""} ${amount}`.trim();
+  }
+}
+
+const PACK_LABELS = { per_month: "per month", per_year: "per year", per_session: "per session", per_hour: "per hour", one_off: "one-off" };
+
+function packText(c) {
+  if (c.pack_size && ["ml", "l", "g", "kg"].includes(c.pack_unit)) return `${c.pack_size} ${c.pack_unit === "l" ? "L" : c.pack_unit}`;
+  if (c.pack_size && c.pack_unit === "pieces") return `${c.pack_size} pieces`;
+  return PACK_LABELS[c.pack_unit] || "";
+}
+
+function competitorLabel(c) {
+  return c.product.toLowerCase().startsWith(c.brand.toLowerCase()) ? c.product : `${c.brand} ${c.product}`;
+}
+
+function competitorDetail(c) {
+  const bits = [];
+  if (c.price != null) {
+    bits.push(money(c.price, c.currency));
+    const pack = packText(c);
+    if (pack) bits.push(pack);
+    if (c.tag === "estimated") bits.push("estimated");
+  } else {
+    bits.push("price not found");
+  }
+  if (c.kind === "substitute") bits.push("what people use instead");
+  return bits.join(" · ");
+}
+
+function sourceList(competitors) {
+  const withSource = competitors.filter((c) => c.source_url);
+  if (!withSource.length) return null;
+  return el("div", { class: "sources" },
+    el("div", { class: "sources-title" }, "Sources"),
+    ...withSource.map((c) => el("div", {},
+      el("a", { href: c.source_url, target: "_blank", rel: "noopener noreferrer" },
+        `${competitorLabel(c)} — ${c.source_name || "source"}`))));
+}
+
+function rangeText(r) {
+  let text = `Competitors charge ${money(r.pack_low, r.currency)} to ${money(r.pack_high, r.currency)} per pack`;
+  if (r.unit) text += ` (${money(r.unit_low, r.currency)} to ${money(r.unit_high, r.currency)} per ${r.unit === "l" ? "litre" : r.unit})`;
+  text += `, from ${r.count} product${r.count === 1 ? "" : "s"}.`;
+  if (r.tag !== "verified") text += " Some prices are estimates.";
+  return text;
+}
+
+// The research panel shown on questions 15 and 17. onRetry re-renders the screen.
+function researchBox(kind) {
+  const r = research();
+  if (r.status === "none") return null;
+  if (r.status === "running") {
+    return el("div", { class: "note research", role: "status" },
+      el("span", { class: "spinner small", "aria-hidden": "true" }),
+      el("span", {}, "Looking up real competitors and prices. This usually takes a minute or two; you can answer now or wait."));
+  }
+  if (r.status === "failed") {
+    return el("div", { class: "note research" },
+      el("span", {}, "Could not look up competitors this time. "),
+      el("button", {
+        class: "link", type: "button",
+        onclick: async () => {
+          state.session.research = await api("POST", `/api/sessions/${state.session.id}/research`);
+          render();
+        },
+      }, "Try again"));
+  }
+  const competitors = r.competitors || [];
+  const box = el("div", { class: "note research done" });
+  if (kind === "prices") {
+    box.append(el("div", {}, r.price_range ? rangeText(r.price_range) : "No competitor prices with a source were found."));
+  } else if (!competitors.length) {
+    box.append(el("div", {}, "No competitors were found. Name the closest one you know."));
+  }
+  if (r.market_note) box.append(el("div", { class: "market-note" }, r.market_note));
+  // On the price question, list only the prices the range was worked out from.
+  const direct = competitors.some((c) => c.price != null && c.kind === "direct");
+  const sources = sourceList(competitors.filter((c) =>
+    kind !== "prices" || (c.price != null && (!direct || c.kind === "direct"))));
+  if (kind === "prices" && sources) box.append(sources);
+  return box.children.length ? box : null;
+}
+
+// Question 15 becomes a pick-one list of the competitors research found.
+function withResearch(q) {
+  const r = research();
+  if (q.research !== "competitors" || r.status !== "done" || !(r.competitors || []).length) return q;
+  return {
+    ...q,
+    type: "choice",
+    options: [
+      ...r.competitors.map((c) => ({ label: competitorLabel(c), detail: competitorDetail(c) })),
+      { label: "None of these is close" },
+    ],
+  };
+}
+
+function watchResearch(onDone) {
+  clearInterval(pollTimer);
+  if (research().status !== "running") return;
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await api("GET", `/api/sessions/${state.session.id}/research`);
+      if (r.status === "running") return;
+      clearInterval(pollTimer);
+      state.session.research = r;
+      onDone();
+    } catch (err) { /* try again on the next tick */ }
+  }, 3000);
+}
+
 // ---------- question screen ----------
 
 function renderQuestion() {
   const base = state.questions[state.index];
-  const q = view(base);
+  const q = withResearch(view(base));
   const saved = isSkipped(base) ? null : answers()[q.id];
   renderProgress(q.stage);
 
@@ -141,6 +269,8 @@ function renderQuestion() {
   const screen = el("div", { class: "screen" }, el("h1", {}, q.text));
   if (q.hint) screen.append(el("p", { class: "hint" }, q.hint));
   if (q.note) screen.append(el("div", { class: "note" }, q.note));
+  let box = q.research ? researchBox(q.research) : null;
+  if (box) screen.append(box);
 
   let focusTarget = null;
 
@@ -184,7 +314,9 @@ function renderQuestion() {
           refresh();
         },
       },
-        el("span", {}, option.label),
+        el("span", { class: "qa" },
+          el("div", {}, option.label),
+          option.detail ? el("div", { class: "q" }, option.detail) : null),
         option.soon
           ? el("span", { class: "badge" }, "Coming later")
           : el("span", { class: "check", "aria-hidden": "true" }, "✓"));
@@ -192,6 +324,10 @@ function renderQuestion() {
       list.append(row);
     }
     screen.append(list);
+    if (q.research === "competitors") {
+      const sources = sourceList(research().competitors || []);
+      if (sources) screen.append(sources);
+    }
     if (q.type === "multi") {
       const input = el("input", {
         class: "field",
@@ -229,6 +365,26 @@ function renderQuestion() {
   main.replaceChildren(screen);
   refresh();
   if (focusTarget) focusTarget.focus();
+
+  // When research finishes while this screen is open, show it without losing
+  // anything typed: redraw if nothing is typed yet, otherwise offer to.
+  if (q.research) {
+    watchResearch(() => {
+      const untouched = text.trim() === "" && picked.size === 0 && other.trim() === "";
+      if (untouched || q.research === "prices") {
+        const fresh = researchBox(q.research);
+        if (q.research === "competitors" || !box) return render();
+        box.replaceWith(fresh);
+        box = fresh;
+      } else {
+        const fresh = el("div", { class: "note research done" },
+          el("span", {}, "Competitors found. "),
+          el("button", { class: "link", type: "button", onclick: render }, "Show them"));
+        if (box) box.replaceWith(fresh); else screen.insertBefore(fresh, screen.children[1]);
+        box = fresh;
+      }
+    });
+  }
 }
 
 // ---------- follow-up screen ----------
@@ -389,6 +545,30 @@ function showDone() {
     screen.append(el("div", { class: "section-title" }, stage.name), list);
   }
 
+  const r = research();
+  if (r.status !== "none") {
+    screen.append(el("div", { class: "section-title" }, "Research"));
+    if (r.status === "done" && (r.competitors || []).length) {
+      const list = el("div", { class: "list" });
+      for (const c of r.competitors) {
+        list.append(el("div", { class: "row static" },
+          el("span", { class: "qa" },
+            el("div", { class: "a" }, competitorLabel(c)),
+            el("div", { class: "q" }, competitorDetail(c) + (c.pitch ? ` · “${c.pitch}”` : ""))),
+          c.source_url
+            ? el("a", { class: "edit", href: c.source_url, target: "_blank", rel: "noopener noreferrer" }, "Source")
+            : null));
+      }
+      screen.append(list);
+      if (r.price_range) screen.append(el("p", { class: "lead small" }, rangeText(r.price_range)));
+      if (r.market_note) screen.append(el("p", { class: "lead small" }, r.market_note));
+    } else {
+      const box = researchBox("competitors");
+      if (box) screen.append(box);
+      watchResearch(showDone);
+    }
+  }
+
   screen.append(
     el("div", { class: "file" }, `Saved to reports/${state.session.id}.json`),
     el("div", { class: "actions" },
@@ -411,6 +591,7 @@ function showDone() {
 // ---------- start ----------
 
 function render() {
+  clearInterval(pollTimer);
   if (state.view === "done") showDone();
   else if (state.view === "followup") renderFollowUp();
   else renderQuestion();
