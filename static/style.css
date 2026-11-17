@@ -691,3 +691,18 @@ textarea.quick-field { min-height: 260px; }
   .chart-tip { display: none !important; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
+
+
+/* Update banner */
+.update-bar {
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 16px;
+  padding: 10px 20px; background: var(--card); border-bottom: 1px solid var(--separator);
+  font-size: 14px;
+}
+.update-bar[hidden] { display: none; }
+.update-text { max-width: 640px; }
+.update-changes { color: var(--secondary); }
+.update-note { color: var(--secondary); }
+.btn.small { padding: 6px 12px; font-size: 14px; border-radius: 9px; }
+button.link.small { font-size: 13px; }
+@media print { .update-bar { display: none !important; } }

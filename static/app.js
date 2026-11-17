@@ -1062,7 +1062,9 @@ async function showHistory() {
       : "Nothing saved yet. Your first run will appear here."),
     runs.length ? list : null,
     el("div", { class: "actions" }, back, el("span", { class: "spacer" }),
-      el("button", { class: "btn primary", type: "button", onclick: newIdea }, "Check another idea"))));
+      el("button", { class: "btn primary", type: "button", onclick: newIdea }, "Check another idea")),
+    appVersion ? el("p", { class: "file" }, `App version ${appVersion} · `,
+      el("button", { class: "link small", type: "button", onclick: () => checkForUpdate(true) }, "Check for updates")) : null));
   window.scrollTo(0, 0);
 }
 
@@ -1101,6 +1103,60 @@ function placeSession() {
     state.view = "followup";
   }
 }
+
+// ---------- updates: a banner when a newer version has been pushed ----------
+
+const updateBar = document.getElementById("update-bar");
+let appVersion = "";
+
+async function checkForUpdate(force) {
+  let info;
+  try {
+    info = await api("GET", "/api/update" + (force ? "?force=1" : ""));
+  } catch (err) {
+    return;
+  }
+  appVersion = info.version || "";
+  if (!info.available) {
+    updateBar.hidden = true;
+    return;
+  }
+  const changes = (info.changes || []).slice(0, 3);
+  updateBar.replaceChildren(
+    el("div", { class: "update-text" },
+      el("strong", {}, "A new version is available"),
+      info.latest ? ` (${info.latest})` : "",
+      changes.length ? el("span", { class: "update-changes" }, " · " + changes.join(" · ")) : null),
+    info.local_changes
+      ? el("span", { class: "update-note" }, "This copy has local edits, so it can't update itself.")
+      : el("button", { class: "btn primary small", type: "button", onclick: runUpdate }, "Update now"));
+  updateBar.hidden = false;
+}
+
+async function runUpdate() {
+  updateBar.replaceChildren(el("span", { class: "spinner tiny" }), el("span", {}, " Updating… the app will restart in a few seconds."));
+  const res = await fetch("/api/update", { method: "POST" }).catch(() => null);
+  if (!res || !res.ok) {
+    const detail = res ? (await res.json().catch(() => ({}))).detail : null;
+    updateBar.replaceChildren(el("span", {}, detail || "The update didn't work. Try again, or restart the app with ./run.sh."),
+      el("button", { class: "btn plain small", type: "button", onclick: () => checkForUpdate(true) }, "Close"));
+    return;
+  }
+  // Wait for the restarted app to answer, then reload the page onto the new version.
+  const started = Date.now();
+  await new Promise((r) => setTimeout(r, 1500));
+  while (Date.now() - started < 90000) {
+    try {
+      const info = await api("GET", "/api/update");
+      if (info.version) return location.reload();
+    } catch (err) { /* still restarting */ }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  updateBar.replaceChildren(el("span", {}, "The app didn't come back. Start it again with ./run.sh."));
+}
+
+checkForUpdate(false);
+setInterval(() => checkForUpdate(false), 30 * 60 * 1000);
 
 // ---------- start ----------
 

@@ -1,4 +1,6 @@
-fastapi
-uvicorn
-anthropic
-python-dotenv
+# Locked to the versions the app is tested with, so every copy (and every
+# automatic update) installs exactly the same thing.
+fastapi==0.128.8
+uvicorn==0.39.0
+anthropic==0.125.0
+python-dotenv==1.2.1

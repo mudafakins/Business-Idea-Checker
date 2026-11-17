@@ -21,7 +21,7 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-from . import checker, conductor, ideas, quick, researcher, scorer, writer  # noqa: E402  (need the environment loaded first)
+from . import checker, conductor, ideas, quick, researcher, scorer, updater, writer  # noqa: E402  (need the environment loaded first)
 from .questions import QUESTIONS, QUESTIONS_BY_ID, STAGES, path_of  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -796,6 +796,32 @@ def make_report(session_id: str):
     load(session_id)
     start_report(session_id)
     return report_status(load(session_id))
+
+
+# ---------- updates from GitHub ----------
+
+def _busy() -> bool:
+    """True while any research, check, idea or report job is still running."""
+    threads = list(_research.values()) + list(_reports.values()) + list(_idea_jobs.values())
+    threads += [state["thread"] for state in _checks.values()]
+    threads += [t for jobs in _jobs.values() for t in jobs]
+    return any(t.is_alive() for t in threads)
+
+
+@app.get("/api/update")
+def get_update(force: bool = False):
+    return updater.check(force=force)
+
+
+@app.post("/api/update")
+def apply_update():
+    if _busy():
+        raise HTTPException(409, "A check is still running. Update once it has finished.")
+    error = updater.apply()
+    if error:
+        raise HTTPException(409, error)
+    updater.restart_soon()
+    return {"ok": True, "restarting": True}
 
 
 @app.get("/")
