@@ -128,14 +128,9 @@ function renderQuestion() {
       if (slow) showWorking("Reading your idea…");
       const result = await api("PUT", `/api/sessions/${state.session.id}/answers/${q.id}`, answer);
       state.session = result.session;
-      if (result.follow_up) {
-        state.followUp = { id: q.id, text: result.follow_up };
-        state.view = "followup";
-        return render();
-      }
       await advance();
     } catch (err) {
-      if (slow) render();
+      if (!main.querySelector(".error")) render();
       const shown = main.querySelector(".error");
       if (shown) shown.textContent = SAVE_ERROR;
       delete next.dataset.busy;
@@ -239,7 +234,7 @@ function renderQuestion() {
 // ---------- follow-up screen ----------
 
 function renderFollowUp() {
-  const { id, text: question } = state.followUp;
+  const { id, text: question, about } = state.followUp;
   const base = state.questions.find((q) => q.id === id);
   renderProgress(base.stage);
 
@@ -262,9 +257,9 @@ function renderFollowUp() {
       state.session = result.session;
       state.followUp = null;
       state.view = "question";
-      await advance();
+      await advance(true);
     } catch (err) {
-      if (slow) render();
+      if (!main.querySelector(".error")) render();
       const shown = main.querySelector(".error");
       if (shown) shown.textContent = SAVE_ERROR;
       delete next.dataset.busy;
@@ -284,6 +279,7 @@ function renderFollowUp() {
   main.replaceChildren(el("div", { class: "screen" },
     el("div", { class: "eyebrow" }, "One more detail"),
     el("h1", {}, question),
+    about ? el("p", { class: "hint" }, `About your answer to: ${about}`) : null,
     input,
     el("div", { class: "actions" },
       el("span", { class: "spacer" }),
@@ -310,15 +306,39 @@ function previousIndex() {
   return -1;
 }
 
-async function advance() {
+// A follow-up the Conductor has asked for and the person has not yet seen.
+function pendingFollowUp() {
+  for (const q of state.questions) {
+    const a = answers()[q.id];
+    if (a && a.follow_up && a.follow_up.status === "pending") {
+      return { id: q.id, text: a.follow_up.question, about: a.question };
+    }
+  }
+  return null;
+}
+
+// afterFollowUp: the current question is already answered, so stay on it if it
+// is still open (the follow-up interrupted before it was shown).
+async function advance(afterFollowUp) {
+  const pending = pendingFollowUp();
+  if (pending) {
+    state.followUp = pending;
+    state.view = "followup";
+    return render();
+  }
   if (state.returnToDone) return showDone();
-  const i = nextIndex();
+  const current = state.questions[state.index];
+  const stay = afterFollowUp && !answers()[current.id];
+  const i = stay ? state.index : nextIndex();
   if (i !== -1) {
     state.index = i;
     state.view = "question";
     return render();
   }
+  // Checks on the last answers may still be running; the server waits for them.
+  if (state.ai) showWorking("Checking your answers…");
   state.session = await api("POST", `/api/sessions/${state.session.id}/complete`);
+  if (pendingFollowUp()) return advance(true);
   showDone();
 }
 
@@ -415,6 +435,12 @@ async function start() {
     const firstOpen = state.questions.findIndex((q) => !state.session.answers[q.id]);
     if (state.session.completed || firstOpen === -1) state.view = "done";
     else state.index = firstOpen;
+    const pending = pendingFollowUp();
+    if (pending) {
+      state.followUp = pending;
+      state.view = "followup";
+      if (firstOpen === -1) state.index = state.questions.length - 1;
+    }
   }
   render();
 }

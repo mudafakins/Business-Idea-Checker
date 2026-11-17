@@ -5,6 +5,9 @@ import logging
 import os
 import re
 import secrets
+import threading
+import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Union
@@ -96,54 +99,124 @@ def shown_text(session: dict, question: dict) -> str:
     return session.get("questions", {}).get(question["id"], {}).get("text", question["text"])
 
 
+# ---------- running the Conductor without blocking the form ----------
+#
+# A Conductor call takes several seconds. It works on a snapshot of the session
+# and its results are merged into the latest saved copy afterwards, so answers
+# given in the meantime are never overwritten.
+
+_locks = defaultdict(threading.Lock)   # one per session, guards the file
+_jobs = defaultdict(list)              # background checks still running
+
+
+def run_conductor(session_id: str, question_id: str, work) -> dict:
+    """work(snapshot) -> follow-up text or None. Returns the merged session."""
+    with _locks[session_id]:
+        snapshot = load(session_id)
+    answered_at = snapshot["answers"][question_id].get("answered_at")
+    calls_before = len(snapshot.get("usage", {}).get("log", []))
+    follow_up = work(snapshot)
+
+    with _locks[session_id]:
+        session = load(session_id)
+        for key in ("business_type", "questions"):
+            if key in snapshot:
+                session[key] = snapshot[key]
+        # Skips: only for questions the person has not reached themselves.
+        for qid, a in snapshot["answers"].items():
+            if a.get("inferred") and qid not in session["answers"]:
+                session["answers"][qid] = a
+        # Follow-up: only if the answer it is about has not changed since.
+        current = session["answers"].get(question_id)
+        if follow_up and current and current.get("answered_at") == answered_at and not current.get("follow_up"):
+            current["follow_up"] = {"question": follow_up, "answer": None, "status": "pending"}
+        new_calls = snapshot.get("usage", {}).get("log", [])[calls_before:]
+        if new_calls:
+            usage = session.setdefault("usage", {"calls": 0, "input_tokens": 0, "output_tokens": 0, "searches": 0, "log": []})
+            for call in new_calls:
+                usage["calls"] += 1
+                usage["input_tokens"] += call["input_tokens"]
+                usage["output_tokens"] += call["output_tokens"]
+                usage["log"].append(call)
+        save(session)
+        return session
+
+
+def run_in_background(session_id: str, question_id: str, work) -> None:
+    def job():
+        try:
+            run_conductor(session_id, question_id, work)
+        except Exception:
+            logging.getLogger("conductor").exception("background check failed")
+    thread = threading.Thread(target=job, daemon=True)
+    _jobs[session_id].append(thread)
+    thread.start()
+
+
+def wait_for_background(session_id: str, seconds: float) -> None:
+    deadline = time.time() + seconds
+    for thread in _jobs[session_id]:
+        thread.join(max(0.0, deadline - time.time()))
+    _jobs[session_id] = [t for t in _jobs[session_id] if t.is_alive()]
+
+
+def has_pending_follow_up(session: dict) -> bool:
+    return any((a.get("follow_up") or {}).get("status") == "pending" for a in session["answers"].values())
+
+
 @app.put("/api/sessions/{session_id}/answers/{question_id}")
 def put_answer(session_id: str, question_id: str, answer: Answer):
     question = QUESTIONS_BY_ID.get(question_id)
     if question is None:
         raise HTTPException(404, "Unknown question")
-    session = load(session_id)
-    session["answers"][question_id] = {
-        "question": shown_text(session, question),
-        "value": answer.value,
-        "other": answer.other,
-        "dont_know": answer.dont_know,
-        "answered_at": now(),
-    }
-    save(session)
+    with _locks[session_id]:
+        session = load(session_id)
+        session["answers"][question_id] = {
+            "question": shown_text(session, question),
+            "value": answer.value,
+            "other": answer.other,
+            "dont_know": answer.dont_know,
+            "answered_at": now(),
+        }
+        save(session)
 
-    # Conductor: reword and skip later questions, and maybe ask one follow-up.
-    follow_up = None
     if conductor.enabled() and not answer.dont_know:
         if question_id == conductor.IDEA_QUESTION:
-            follow_up = conductor.plan(session, allow_follow_up=True)
+            # The next questions depend on this, so the form waits for it.
+            session = run_conductor(session_id, question_id,
+                                    lambda snap: conductor.plan(snap, allow_follow_up=True))
         elif question["type"] in ("text", "long"):
-            follow_up = conductor.review(session, question_id)
-        if follow_up:
-            session["answers"][question_id]["follow_up"] = {"question": follow_up, "answer": None}
-        save(session)
-    return {"session": session, "follow_up": follow_up}
+            # Vagueness check and skips: the form does not wait.
+            run_in_background(session_id, question_id,
+                              lambda snap: conductor.review(snap, question_id))
+    return {"session": session}
 
 
 @app.put("/api/sessions/{session_id}/answers/{question_id}/follow_up")
 def put_follow_up(session_id: str, question_id: str, body: FollowUpAnswer):
-    session = load(session_id)
-    answer = session["answers"].get(question_id)
-    if answer is None or not answer.get("follow_up"):
-        raise HTTPException(404, "No follow-up for this question")
-    answer["follow_up"]["answer"] = (body.value or "").strip() or None
-    save(session)
+    with _locks[session_id]:
+        session = load(session_id)
+        answer = session["answers"].get(question_id)
+        if answer is None or not answer.get("follow_up"):
+            raise HTTPException(404, "No follow-up for this question")
+        answer["follow_up"]["answer"] = (body.value or "").strip() or None
+        answer["follow_up"]["status"] = "done"
+        save(session)
     # A clearer idea description changes how the later questions should read.
     if question_id == conductor.IDEA_QUESTION and answer["follow_up"]["answer"] and conductor.enabled():
-        conductor.plan(session, allow_follow_up=False)
-        save(session)
+        session = run_conductor(session_id, question_id,
+                                lambda snap: conductor.plan(snap, allow_follow_up=False))
     return {"session": session}
 
 
 @app.post("/api/sessions/{session_id}/complete")
 def complete_session(session_id: str):
-    session = load(session_id)
-    session["completed"] = True
-    save(session)
+    # Let any checks still running finish, so a late follow-up is not lost.
+    wait_for_background(session_id, 25.0)
+    with _locks[session_id]:
+        session = load(session_id)
+        session["completed"] = not has_pending_follow_up(session)
+        save(session)
     return session
 
 

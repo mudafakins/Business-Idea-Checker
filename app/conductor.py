@@ -37,7 +37,7 @@ from .questions import QUESTIONS, QUESTIONS_BY_ID
 log = logging.getLogger("conductor")
 
 MODEL = os.environ.get("CONDUCTOR_MODEL") or "claude-opus-5-5"
-CLI_MODEL = os.environ.get("CONDUCTOR_CLI_MODEL") or "opus"
+CLI_MODEL = os.environ.get("CONDUCTOR_CLI_MODEL") or "claude-sonnet-5-5"
 IDEA_QUESTION = "q8"
 
 # Server-side refusal fallback is only offered on these model families.
@@ -321,7 +321,7 @@ def plan(session: dict, allow_follow_up: bool) -> Optional[str]:
         _said_so_far(session), _describe(todo, session))
     if not allow_follow_up:
         user += "\n\nThe follow-up for the idea has already been used. Return null for follow_up."
-    result = _call(session, "plan", PLAN_SYSTEM, user, Plan, max_tokens=8000, timeout=40.0)
+    result = _call(session, "plan", PLAN_SYSTEM, user, Plan, max_tokens=8000, timeout=60.0)
     if result is None:
         return None
 
@@ -349,7 +349,7 @@ def review(session: dict, question_id: str) -> Optional[str]:
     user = "What the person has said so far:\n%s\n\nThe answer to review:\n- %s\n   %s\n\nRemaining questions:\n%s" % (
         _said_so_far(session), answered["question"], _answer_text(answered),
         _describe(todo, session) or "(none)")
-    result = _call(session, "review:" + question_id, REVIEW_SYSTEM, user, Review, max_tokens=4000, timeout=10.0)
+    result = _call(session, "review:" + question_id, REVIEW_SYSTEM, user, Review, max_tokens=4000, timeout=30.0)
     if result is None:
         return None
     _apply_skips(session, result.skips, todo)
