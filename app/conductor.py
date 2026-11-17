@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from typing_extensions import Literal
 
 from . import ai
-from .questions import QUESTIONS, QUESTIONS_BY_ID
+from .questions import QUESTIONS, QUESTIONS_BY_ID, path_of, visible
 
 IDEA_QUESTION = "q8"
 enabled = ai.enabled
@@ -42,6 +42,7 @@ class Skip(BaseModel):
 
 class Plan(BaseModel):
     business_type: Literal["product", "service", "software", "local_business", "marketplace"]
+    decline_reason: Optional[str] = None
     follow_up: Optional[str] = None
     questions: List[Reworded]
     skips: List[Skip]
@@ -83,7 +84,12 @@ it clearer. Hints are optional and one short line. For a question marked adapt_o
 also return 4 to 7 short option labels fitted to the person's country and business type, \
 for example the marketplaces and channels people really use there. Return options for no \
 other question.
-3. Decide on a follow-up to the idea description, and on skips, by the rules above."""
+3. Decide on a follow-up to the idea description, and on skips, by the rules above.
+
+Only if the idea is clearly illegal where the person lives, or could seriously harm people, \
+set decline_reason to one polite sentence saying why it cannot be checked, and return empty \
+questions and skips. Ordinary risky, regulated or unusual businesses are not declined; leave \
+decline_reason empty for them."""
 
 REVIEW_SYSTEM = COMMON + """
 
@@ -119,8 +125,11 @@ def _said_so_far(session: dict) -> str:
 def remaining(session: dict, after: str) -> List[dict]:
     """Questions after `after` that the person has not answered themselves."""
     ids = [q["id"] for q in QUESTIONS]
+    path = path_of(session)
     out = []
     for q in QUESTIONS[ids.index(after) + 1:]:
+        if not visible(q, path) or q["type"] == "pick":
+            continue
         a = session["answers"].get(q["id"])
         if a is None or a.get("inferred"):
             out.append(q)
@@ -171,6 +180,11 @@ def plan(session: dict, allow_follow_up: bool) -> Optional[str]:
     result = _call(session, "plan", PLAN_SYSTEM, user, Plan, max_tokens=8000, timeout=60.0)
     if result is None:
         return None
+    if (result.decline_reason or "").strip():
+        # Brief, overrides: an illegal or unsafe idea is declined politely at the idea stage.
+        session["declined"] = result.decline_reason.strip()
+        return None
+    session.pop("declined", None)
 
     session["business_type"] = result.business_type
     todo_by_id = {q["id"]: q for q in todo}

@@ -21,8 +21,8 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-from . import checker, conductor, researcher, scorer, writer  # noqa: E402  (need the environment loaded first)
-from .questions import QUESTIONS, QUESTIONS_BY_ID, STAGES  # noqa: E402
+from . import checker, conductor, ideas, researcher, scorer, writer  # noqa: E402  (need the environment loaded first)
+from .questions import QUESTIONS, QUESTIONS_BY_ID, STAGES, path_of  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 STATIC = ROOT / "static"
@@ -126,6 +126,10 @@ def run_conductor(session_id: str, question_id: str, work) -> dict:
         for key in ("business_type", "questions"):
             if key in snapshot:
                 session[key] = snapshot[key]
+        if "declined" in snapshot:
+            session["declined"] = snapshot["declined"]
+        else:
+            session.pop("declined", None)
         # Skips: only for questions the person has not reached themselves.
         for qid, a in snapshot["answers"].items():
             if a.get("inferred") and qid not in session["answers"]:
@@ -379,11 +383,19 @@ def put_answer(session_id: str, question_id: str, answer: Answer):
         }
         save(session)
 
+    if conductor.enabled() and question_id in IDEA_INPUTS:
+        # The few-ideas and no-idea paths: start working out the shortlist now.
+        if question_id in ("q8_list", "q9"):
+            start_ideas(session_id)
+        return {"session": load(session_id)}
+
     if conductor.enabled() and not answer.dont_know:
         if question_id == conductor.IDEA_QUESTION:
             # The next questions depend on this, so the form waits for it.
             session = run_conductor(session_id, question_id,
                                     lambda snap: conductor.plan(snap, allow_follow_up=True))
+            if session.get("declined"):
+                return {"session": session}
             if not (session["answers"][question_id].get("follow_up") or {}).get("status") == "pending":
                 start_research(session_id)
         elif question["type"] in ("text", "long"):
@@ -393,6 +405,116 @@ def put_answer(session_id: str, question_id: str, answer: Answer):
     if researcher.idea_text(session):
         schedule_check(session_id)
     return {"session": session}
+
+
+# ---------- few ideas and no idea: the shortlist ----------
+
+IDEA_INPUTS = {"q8_list", "q8_problems", "q9"}
+_idea_jobs = {}   # session id -> thread
+
+
+def _ideas_basis(session: dict) -> str:
+    """What the shortlist was made from; when it changes, the shortlist is redone."""
+    keys = ["q2", "q3", "q4", "q5", "q6", "q7"] + (["q8_list"] if path_of(session) == "few" else ["q8_problems", "q9"])
+    return json.dumps([[k, (session["answers"].get(k) or {}).get("value"), (session["answers"].get(k) or {}).get("other")]
+                       for k in keys], ensure_ascii=False)
+
+
+def start_ideas(session_id: str, more: bool = False) -> None:
+    with _locks[session_id]:
+        session = load(session_id)
+        path = path_of(session)
+        if path == "one" or not conductor.enabled():
+            return
+        basis = _ideas_basis(session)
+        current = session.get("ideas") or {}
+        alive = bool(_idea_jobs.get(session_id) and _idea_jobs[session_id].is_alive())
+        if alive:
+            return
+        same = current.get("basis") == basis
+        if same and current.get("status") == "done" and not more:
+            return
+        keep = current.get("items", []) if same and more and path == "none" else []
+        session["ideas"] = {"status": "running", "mode": "rank" if path == "few" else "suggest",
+                            "basis": basis, "items": keep, "started_at": now()}
+        save(session)
+        snapshot = json.loads(json.dumps(session))
+
+    def job():
+        calls_before = len(snapshot.get("usage", {}).get("log", []))
+        try:
+            if path == "few":
+                result = ideas.rank(snapshot)
+            else:
+                fresh = ideas.suggest(snapshot, keep)
+                result = None if fresh is None else ideas.order(keep + fresh)
+        except Exception:
+            logging.getLogger("ideas").exception("idea job failed")
+            result = None
+        with _locks[session_id]:
+            session = load(session_id)
+            merge_usage(session, snapshot, calls_before)
+            state = session.get("ideas") or {}
+            if state.get("basis") == basis:
+                state["finished_at"] = now()
+                if result is None:
+                    state["status"] = "failed"
+                else:
+                    state.update(status="done", items=result)
+                session["ideas"] = state
+            save(session)
+
+    thread = threading.Thread(target=job, daemon=True)
+    _idea_jobs[session_id] = thread
+    thread.start()
+
+
+def ideas_status(session: dict) -> dict:
+    state = dict(session.get("ideas") or {"status": "none", "items": []})
+    thread = _idea_jobs.get(session["id"])
+    if state.get("status") == "running" and not (thread and thread.is_alive()):
+        state["status"] = "failed"
+    if state.get("status") == "done" and state.get("basis") != _ideas_basis(session):
+        state["stale"] = True
+    state.pop("basis", None)
+    return state
+
+
+class IdeasRequest(BaseModel):
+    more: bool = False
+
+
+class PickRequest(BaseModel):
+    idea_id: str
+
+
+@app.get("/api/sessions/{session_id}/ideas")
+def get_ideas(session_id: str):
+    return ideas_status(load(session_id))
+
+
+@app.post("/api/sessions/{session_id}/ideas")
+def make_ideas(session_id: str, body: IdeasRequest):
+    load(session_id)
+    start_ideas(session_id, more=body.more)
+    return ideas_status(load(session_id))
+
+
+@app.post("/api/sessions/{session_id}/pick")
+def pick_idea(session_id: str, body: PickRequest):
+    """The chosen idea becomes the answer to q8, and the one-idea flow takes over."""
+    with _locks[session_id]:
+        session = load(session_id)
+        items = (session.get("ideas") or {}).get("items") or []
+        chosen = next((i for i in items if i["id"] == body.idea_id and not i.get("unsafe_reason")), None)
+        if chosen is None:
+            raise HTTPException(404, "Unknown idea")
+        session["answers"]["pick"] = {
+            "question": QUESTIONS_BY_ID["pick"]["text"], "value": chosen["title"], "other": None,
+            "dont_know": False, "idea_id": chosen["id"], "answered_at": now(),
+        }
+        save(session)
+    return put_answer(session_id, conductor.IDEA_QUESTION, Answer(value=chosen["description"]))
 
 
 @app.put("/api/sessions/{session_id}/answers/{question_id}/follow_up")

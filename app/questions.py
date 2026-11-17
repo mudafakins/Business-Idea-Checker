@@ -1,10 +1,14 @@
-"""Fixed question bank (brief section 4). Step 1 covers the one-idea path only.
+"""Fixed question bank (brief section 4), for all three entry paths.
 
 Question types:
   choice - pick one option
   multi  - pick any options, plus optional free text
   text   - one short line
   long   - a few sentences
+  pick   - choose one idea from a list the agent makes (few-ideas and no-idea paths)
+
+A question with "paths" is only asked on those paths; the rest are asked on all.
+On the few-ideas and no-idea paths, the idea picked becomes the answer to q8.
 """
 
 STAGES = [
@@ -18,6 +22,9 @@ STAGES = [
 ]
 
 ONE_IDEA = "I have one idea"
+FEW_IDEAS = "I have a few ideas"
+NO_IDEA = "I have no idea yet"
+PATHS = {ONE_IDEA: "one", FEW_IDEAS: "few", NO_IDEA: "none"}
 
 QUESTIONS = [
     # Stage 0: Entry
@@ -26,8 +33,8 @@ QUESTIONS = [
         "text": "Where are you right now?",
         "options": [
             {"label": ONE_IDEA},
-            {"label": "I have a few ideas", "soon": True},
-            {"label": "I have no idea yet", "soon": True},
+            {"label": FEW_IDEAS},
+            {"label": NO_IDEA},
         ],
     },
     # Stage 1: About you and your non-negotiables
@@ -74,9 +81,28 @@ QUESTIONS = [
         ],
         "other_placeholder": "Anything else?",
     },
-    # Stage 2: The idea (one-idea path)
+    # Stage 2: The idea
     {
-        "id": "q8", "stage": 2, "type": "long",
+        "id": "q8_list", "stage": 2, "type": "long", "paths": ["few"], "allow_unknown": False,
+        "text": "List your ideas, one per line.",
+        "hint": "A sentence each is enough. We will check each one against what you told us.",
+        "placeholder": "Idea one\nIdea two\nIdea three",
+    },
+    {
+        "id": "q8_problems", "stage": 2, "type": "long", "paths": ["none"],
+        "text": "What problems annoy you or people around you?",
+        "hint": "Everyday hassles, things that cost too much, things nobody does well.",
+    },
+    {
+        "id": "q9", "stage": 2, "type": "long", "paths": ["none"],
+        "text": "Which industries or customers do you know well?",
+    },
+    {
+        "id": "pick", "stage": 2, "type": "pick", "paths": ["few", "none"], "allow_unknown": False,
+        "text": "Which idea do you want to test?",
+    },
+    {
+        "id": "q8", "stage": 2, "type": "long", "paths": ["one"],
         "text": "Describe your idea in one or two sentences.",
     },
     # Stage 3: Customer and problem
@@ -152,3 +178,13 @@ QUESTIONS = [
 ]
 
 QUESTIONS_BY_ID = {q["id"]: q for q in QUESTIONS}
+
+
+def path_of(session: dict) -> str:
+    """"one", "few" or "none", from the answer to the first question."""
+    a = session.get("answers", {}).get("q1") or {}
+    return PATHS.get(a.get("value"), "one")
+
+
+def visible(question: dict, path: str) -> bool:
+    return not question.get("paths") or path in question["paths"]

@@ -68,6 +68,19 @@ function isSkipped(q) {
   return !!(a && a.inferred);
 }
 
+// The entry path from the first answer: one idea, a few ideas, or no idea yet.
+const PATHS = { "I have one idea": "one", "I have a few ideas": "few", "I have no idea yet": "none" };
+
+function currentPath() {
+  const a = answers().q1;
+  return (a && PATHS[a.value]) || "one";
+}
+
+// Some questions are only asked on some paths.
+function asked(q) {
+  return !q.paths || q.paths.includes(currentPath());
+}
+
 const SAVE_ERROR = "Could not save. Check that the app is still running, then try again.";
 
 // ---------- progress ----------
@@ -223,6 +236,7 @@ function watchResearch(onDone) {
 
 function renderQuestion() {
   const base = state.questions[state.index];
+  if (base.type === "pick") return renderPick(base);
   const q = withResearch(view(base));
   const saved = isSkipped(base) ? null : answers()[q.id];
   renderProgress(q.stage);
@@ -262,6 +276,7 @@ function renderQuestion() {
       const result = await api("PUT", `/api/sessions/${state.session.id}/answers/${q.id}`, answer);
       state.session = result.session;
       startAlertWatch();
+      if (state.session.declined) return showDeclined();
       await advance();
     } catch (err) {
       if (!main.querySelector(".error")) render();
@@ -398,6 +413,165 @@ function renderQuestion() {
   }
 }
 
+// ---------- pick an idea (few-ideas and no-idea paths) ----------
+
+async function renderPick(q) {
+  renderProgress(q.stage);
+  const mode = currentPath() === "few" ? "rank" : "suggest";
+  let data;
+  try {
+    data = await api("GET", `/api/sessions/${state.session.id}/ideas`);
+    if (data.status === "none" || data.stale) data = await api("POST", `/api/sessions/${state.session.id}/ideas`, { more: false });
+  } catch (err) {
+    main.replaceChildren(el("p", { class: "error" }, SAVE_ERROR));
+    return;
+  }
+  if (state.view !== "question" || state.questions[state.index] !== q) return;
+
+  const back = el("button", {
+    class: "btn plain", type: "button",
+    onclick: () => { state.index = previousIndex(); render(); },
+  }, "Back");
+
+  const items = data.items || [];
+  if (data.status === "running" && !items.length) {
+    main.replaceChildren(el("div", { class: "screen" },
+      el("h1", {}, mode === "rank" ? "Checking your ideas" : "Finding ideas that fit you"),
+      el("div", { class: "working inline", role: "status" },
+        el("div", { class: "spinner", "aria-hidden": "true" }),
+        el("p", {}, mode === "rank"
+          ? "Looking up each idea and checking it against what you told us. This takes a minute or two."
+          : "Looking for ideas that fit your money, time, skills and limits. This takes a minute or two.")),
+      el("div", { class: "actions" }, back)));
+    return watchIdeas(q);
+  }
+  if (data.status === "failed" && !items.length) {
+    main.replaceChildren(el("div", { class: "screen" },
+      el("h1", {}, "That didn't work this time"),
+      el("p", { class: "lead" }, "The ideas could not be checked. Try again, or go back and change your answers."),
+      el("div", { class: "actions" }, back, el("span", { class: "spacer" }),
+        el("button", {
+          class: "btn primary", type: "button",
+          onclick: async () => { await api("POST", `/api/sessions/${state.session.id}/ideas`, { more: false }); render(); },
+        }, "Try again"))));
+    return;
+  }
+
+  const safe = items.filter((i) => !i.unsafe_reason);
+  const unsafe = items.filter((i) => i.unsafe_reason);
+  const saved = answers().pick;
+  let chosen = saved ? saved.idea_id : null;
+  if (!safe.some((i) => i.id === chosen)) chosen = null;
+  const go = el("button", { class: "btn primary", type: "button", onclick: () => choose() }, "Test this idea");
+  const error = el("div", { class: "error", role: "alert" });
+  const refresh = () => { go.disabled = !chosen; };
+
+  async function choose() {
+    if (!chosen || go.dataset.busy) return;
+    go.dataset.busy = "1";
+    go.disabled = true;
+    try {
+      showWorking("Reading your idea…");
+      const result = await api("POST", `/api/sessions/${state.session.id}/pick`, { idea_id: chosen });
+      state.session = result.session;
+      if (state.session.declined) return showDeclined();
+      await advance();
+    } catch (err) {
+      render();
+    }
+  }
+
+  const list = el("div", { class: "idea-list" });
+  safe.forEach((idea, n) => {
+    const card = el("button", {
+      class: "idea" + (idea.id === chosen ? " selected" : ""), type: "button",
+      "aria-pressed": String(idea.id === chosen),
+      onclick: () => {
+        chosen = idea.id;
+        for (const c of list.children) {
+          const on = c.dataset.id === chosen;
+          c.classList.toggle("selected", on);
+          c.setAttribute("aria-pressed", String(on));
+        }
+        refresh();
+      },
+    },
+      el("div", { class: "idea-head" },
+        el("span", { class: "idea-rank" }, String(n + 1)),
+        el("span", { class: "idea-title" }, idea.title),
+        n === 0 && !idea.breaks.length ? el("span", { class: "pill best" }, "Best fit") : null,
+        el("span", { class: "idea-score" }, `Fit ${idea.score}/10`)),
+      el("div", { class: "idea-desc" }, idea.description),
+      el("div", { class: "idea-reason" }, idea.reason),
+      idea.breaks.length ? el("div", { class: "idea-breaks" }, `Breaks your limit: ${idea.breaks.join(", ")}`) : null,
+      idea.evidence.length
+        ? el("div", { class: "idea-evidence" }, ...idea.evidence.map((e) => el("div", {}, e.claim, " · ", e.source_name || "source")))
+        : null);
+    card.dataset.id = idea.id;
+    list.append(card);
+  });
+
+  const screen = el("div", { class: "screen" },
+    el("h1", {}, mode === "rank" ? "Your ideas, ranked" : "Ideas that fit you"),
+    el("p", { class: "hint" }, mode === "rank"
+      ? "Ranked by how well each fits your money, time, skills, timing and limits, with a quick check on demand. Pick one to test."
+      : "Built from the problems and areas you know, and checked against your limits. Pick one to test, or ask for more."),
+    list);
+  if (unsafe.length) {
+    screen.append(el("div", { class: "section-title" }, "Not checked"),
+      el("div", { class: "list" }, ...unsafe.map((i) => el("div", { class: "row static" },
+        el("span", { class: "qa" }, el("div", { class: "a" }, i.title), el("div", { class: "q" }, i.unsafe_reason))))));
+  }
+  const actions = el("div", { class: "actions" }, back, el("span", { class: "spacer" }));
+  if (mode === "suggest") {
+    actions.append(data.status === "running"
+      ? el("span", { class: "muted small more-loading" }, el("span", { class: "spinner tiny" }), " Finding 5 more…")
+      : el("button", {
+        class: "btn plain", type: "button",
+        onclick: async () => { await api("POST", `/api/sessions/${state.session.id}/ideas`, { more: true }); render(); },
+      }, "Show 5 more"));
+  }
+  actions.append(go);
+  screen.append(actions, error);
+  main.replaceChildren(screen);
+  refresh();
+  if (data.status === "running") watchIdeas(q);
+}
+
+function watchIdeas(q) {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const data = await api("GET", `/api/sessions/${state.session.id}/ideas`);
+      if (data.status === "running") return;
+      clearInterval(pollTimer);
+      if (state.view === "question" && state.questions[state.index] === q) render();
+    } catch (err) { /* try again on the next tick */ }
+  }, 3000);
+}
+
+// An illegal or unsafe idea is declined politely at the idea stage (brief, section 6).
+function showDeclined() {
+  state.view = "declined";
+  renderProgress(2);
+  const path = currentPath();
+  main.replaceChildren(el("div", { class: "screen" },
+    el("h1", {}, "We can't check this idea"),
+    el("p", { class: "lead" }, state.session.declined),
+    el("p", { class: "hint" }, "You're welcome to try a different idea."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn plain", type: "button", onclick: newIdea }, "Start over"),
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "btn primary", type: "button",
+        onclick: () => {
+          state.index = state.questions.findIndex((x) => x.id === (path === "one" ? "q8" : "pick"));
+          state.view = "question";
+          render();
+        },
+      }, path === "one" ? "Describe a different idea" : "Choose a different idea"))));
+}
+
 // ---------- follow-up screen ----------
 
 function renderFollowUp() {
@@ -461,14 +635,16 @@ function renderFollowUp() {
 
 function nextIndex() {
   for (let i = state.index + 1; i < state.questions.length; i++) {
-    if (!isSkipped(state.questions[i])) return i;
+    const q = state.questions[i];
+    if (asked(q) && !isSkipped(q)) return i;
   }
   return -1;
 }
 
 function previousIndex() {
   for (let i = state.index - 1; i >= 0; i--) {
-    if (!isSkipped(state.questions[i])) return i;
+    const q = state.questions[i];
+    if (asked(q) && !isSkipped(q)) return i;
   }
   return -1;
 }
@@ -546,6 +722,7 @@ function showDone() {
     for (const base of qs) {
       const q = view(base);
       const a = answers()[q.id];
+      if (!asked(base) && !a) continue;
       list.append(el("button", {
         class: "row", type: "button",
         onclick: () => {
@@ -738,7 +915,8 @@ function showAlerts() {
 function render() {
   clearInterval(pollTimer);
   clearInterval(reportTimer);
-  if (state.view === "report") showReport();
+  if (state.view === "declined") showDeclined();
+  else if (state.view === "report") showReport();
   else if (state.view === "done") showDone();
   else if (state.view === "followup") renderFollowUp();
   else renderQuestion();
@@ -760,7 +938,7 @@ async function start() {
   }
   if (state.session) {
     // Resume where the user left off.
-    const firstOpen = state.questions.findIndex((q) => !state.session.answers[q.id]);
+    const firstOpen = state.questions.findIndex((q) => asked(q) && !state.session.answers[q.id]);
     if (state.session.completed || firstOpen === -1) state.view = state.ai && state.session.completed ? "report" : "done";
     else state.index = firstOpen;
     const pending = pendingFollowUp();
@@ -769,6 +947,7 @@ async function start() {
       state.view = "followup";
       if (firstOpen === -1) state.index = state.questions.length - 1;
     }
+    if (state.session.declined) state.view = "declined";
     state.alerts = state.session.alerts || [];
     startAlertWatch();
   }
