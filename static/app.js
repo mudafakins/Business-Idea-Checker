@@ -1,13 +1,18 @@
-// Business Idea Checker - step 1: the form, one question per screen.
+// Business Idea Checker - the form, one question per screen.
+// The server's Conductor may reword later questions, skip ones already
+// covered, and ask one follow-up after a vague answer.
 
 const STORAGE_KEY = "idea-checker-session";
+const IDEA_QUESTION = "q8";
 
 const state = {
   stages: [],
   questions: [],
+  ai: false,
   session: null,      // created on the first saved answer
   index: 0,
-  view: "question",   // "question" | "done"
+  view: "question",   // "question" | "followup" | "done"
+  followUp: null,     // { id, text } while a follow-up is on screen
   returnToDone: false,
 };
 
@@ -42,6 +47,26 @@ function answers() {
   return state.session ? state.session.answers : {};
 }
 
+// The question as it should be shown: the fixed one, plus any rewording.
+function view(q) {
+  const override = state.session && state.session.questions && state.session.questions[q.id];
+  if (!override) return q;
+  return {
+    ...q,
+    text: override.text || q.text,
+    hint: override.hint || q.hint,
+    options: override.options || q.options,
+  };
+}
+
+// A question is skipped when an earlier answer already covered it.
+function isSkipped(q) {
+  const a = answers()[q.id];
+  return !!(a && a.inferred);
+}
+
+const SAVE_ERROR = "Could not save. Check that the app is still running, then try again.";
+
 // ---------- progress ----------
 
 function renderProgress(stageId) {
@@ -55,11 +80,18 @@ function renderProgress(stageId) {
   stageName.textContent = stageId > 0 && stage ? stage.name : "";
 }
 
+function showWorking(message) {
+  main.replaceChildren(el("div", { class: "screen working", role: "status" },
+    el("div", { class: "spinner", "aria-hidden": "true" }),
+    el("p", {}, message)));
+}
+
 // ---------- question screen ----------
 
 function renderQuestion() {
-  const q = state.questions[state.index];
-  const saved = answers()[q.id];
+  const base = state.questions[state.index];
+  const q = view(base);
+  const saved = isSkipped(base) ? null : answers()[q.id];
   renderProgress(q.stage);
 
   // Draft of the answer being edited on this screen.
@@ -76,23 +108,37 @@ function renderQuestion() {
   const refresh = () => { next.disabled = !hasAnswer(); };
 
   async function submit(dontKnow) {
+    if (next.dataset.busy) return;
     if (!dontKnow && !hasAnswer()) return;
     const answer = dontKnow
       ? { value: null, other: null, dont_know: true }
       : q.type === "multi"
         ? { value: [...picked], other: other.trim() || null, dont_know: false }
         : { value: text.trim(), other: null, dont_know: false };
+    next.dataset.busy = "1";
     next.disabled = true;
     error.textContent = "";
+    // Reading the idea takes a few seconds, so say what is happening.
+    const slow = state.ai && !dontKnow && q.id === IDEA_QUESTION;
     try {
       if (!state.session) {
         state.session = await api("POST", "/api/sessions");
         localStorage.setItem(STORAGE_KEY, state.session.id);
       }
-      state.session = await api("PUT", `/api/sessions/${state.session.id}/answers/${q.id}`, answer);
+      if (slow) showWorking("Reading your idea…");
+      const result = await api("PUT", `/api/sessions/${state.session.id}/answers/${q.id}`, answer);
+      state.session = result.session;
+      if (result.follow_up) {
+        state.followUp = { id: q.id, text: result.follow_up };
+        state.view = "followup";
+        return render();
+      }
       await advance();
     } catch (err) {
-      error.textContent = "Could not save. Check that the app is still running, then try again.";
+      if (slow) render();
+      const shown = main.querySelector(".error");
+      if (shown) shown.textContent = SAVE_ERROR;
+      delete next.dataset.busy;
       refresh();
     }
   }
@@ -167,10 +213,10 @@ function renderQuestion() {
   const actions = el("div", { class: "actions" });
   if (state.returnToDone) {
     actions.append(el("button", { class: "btn plain", type: "button", onclick: showDone }, "Cancel"));
-  } else if (state.index > 0) {
+  } else if (previousIndex() !== -1) {
     actions.append(el("button", {
       class: "btn plain", type: "button",
-      onclick: () => { state.index -= 1; render(); },
+      onclick: () => { state.index = previousIndex(); render(); },
     }, "Back"));
   }
   actions.append(el("span", { class: "spacer" }));
@@ -180,16 +226,96 @@ function renderQuestion() {
   }
   actions.append(next);
   screen.append(actions, error);
+  if (state.index === 0 && !state.ai) {
+    screen.append(el("p", { class: "file" },
+      "AI is off, so questions use their standard wording. Add your API key to the .env file and restart to turn it on."));
+  }
 
   main.replaceChildren(screen);
   refresh();
   if (focusTarget) focusTarget.focus();
 }
 
+// ---------- follow-up screen ----------
+
+function renderFollowUp() {
+  const { id, text: question } = state.followUp;
+  const base = state.questions.find((q) => q.id === id);
+  renderProgress(base.stage);
+
+  let text = "";
+  const error = el("div", { class: "error", role: "alert" });
+  const next = el("button", { class: "btn primary", type: "button", onclick: () => submit(false) }, "Continue");
+  const refresh = () => { next.disabled = text.trim() === ""; };
+
+  async function submit(skip) {
+    if (next.dataset.busy) return;
+    if (!skip && text.trim() === "") return;
+    next.dataset.busy = "1";
+    next.disabled = true;
+    error.textContent = "";
+    const slow = state.ai && !skip && id === IDEA_QUESTION;
+    try {
+      if (slow) showWorking("Reading your idea…");
+      const result = await api("PUT", `/api/sessions/${state.session.id}/answers/${id}/follow_up`,
+        { value: skip ? null : text.trim() });
+      state.session = result.session;
+      state.followUp = null;
+      state.view = "question";
+      await advance();
+    } catch (err) {
+      if (slow) render();
+      const shown = main.querySelector(".error");
+      if (shown) shown.textContent = SAVE_ERROR;
+      delete next.dataset.busy;
+      refresh();
+    }
+  }
+
+  const input = el("textarea", {
+    class: "field",
+    "aria-label": question,
+    oninput: (e) => { text = e.target.value; refresh(); },
+    onkeydown: (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(false); }
+    },
+  });
+
+  main.replaceChildren(el("div", { class: "screen" },
+    el("div", { class: "eyebrow" }, "One more detail"),
+    el("h1", {}, question),
+    input,
+    el("div", { class: "actions" },
+      el("span", { class: "spacer" }),
+      el("button", { class: "btn plain", type: "button", onclick: () => submit(true) }, "Skip"),
+      next),
+    error));
+  refresh();
+  input.focus();
+}
+
+// ---------- moving between questions ----------
+
+function nextIndex() {
+  for (let i = state.index + 1; i < state.questions.length; i++) {
+    if (!isSkipped(state.questions[i])) return i;
+  }
+  return -1;
+}
+
+function previousIndex() {
+  for (let i = state.index - 1; i >= 0; i--) {
+    if (!isSkipped(state.questions[i])) return i;
+  }
+  return -1;
+}
+
 async function advance() {
   if (state.returnToDone) return showDone();
-  if (state.index < state.questions.length - 1) {
-    state.index += 1;
+  const i = nextIndex();
+  if (i !== -1) {
+    state.index = i;
+    state.view = "question";
     return render();
   }
   state.session = await api("POST", `/api/sessions/${state.session.id}/complete`);
@@ -203,11 +329,13 @@ function answerText(a) {
   if (a.dont_know) return "I don't know";
   const parts = Array.isArray(a.value) ? [...a.value] : [a.value];
   if (a.other) parts.push(a.other);
+  if (a.follow_up && a.follow_up.answer) parts.push(a.follow_up.answer);
   return parts.filter(Boolean).join(", ");
 }
 
 function showDone() {
   state.view = "done";
+  state.followUp = null;
   state.returnToDone = false;
   renderProgress(6);
 
@@ -220,12 +348,13 @@ function showDone() {
     const qs = state.questions.filter((q) => q.stage === stage.id);
     if (!qs.length) continue;
     const list = el("div", { class: "list" });
-    for (const q of qs) {
+    for (const base of qs) {
+      const q = view(base);
       const a = answers()[q.id];
       list.append(el("button", {
         class: "row", type: "button",
         onclick: () => {
-          state.index = state.questions.indexOf(q);
+          state.index = state.questions.indexOf(base);
           state.view = "question";
           state.returnToDone = true;
           render();
@@ -233,7 +362,8 @@ function showDone() {
       },
         el("span", { class: "qa" },
           el("div", { class: "q" }, q.text),
-          el("div", { class: "a" + (!a || a.dont_know ? " unknown" : "") }, answerText(a))),
+          el("div", { class: "a" + (!a || a.dont_know ? " unknown" : "") }, answerText(a)),
+          a && a.inferred ? el("div", { class: "q" }, "Taken from your earlier answers") : null),
         el("span", { class: "edit" }, "Edit")));
     }
     screen.append(el("div", { class: "section-title" }, stage.name), list);
@@ -262,6 +392,7 @@ function showDone() {
 
 function render() {
   if (state.view === "done") showDone();
+  else if (state.view === "followup") renderFollowUp();
   else renderQuestion();
 }
 
@@ -269,6 +400,7 @@ async function start() {
   const data = await api("GET", "/api/questions");
   state.stages = data.stages;
   state.questions = data.questions;
+  state.ai = data.ai;
 
   const savedId = localStorage.getItem(STORAGE_KEY);
   if (savedId) {

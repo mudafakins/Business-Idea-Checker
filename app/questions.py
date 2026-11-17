@@ -109,7 +109,7 @@ QUESTIONS = [
         "text": "Who do you think your competitors are?",
     },
     {
-        "id": "q15", "stage": 4, "type": "text",
+        "id": "q15", "stage": 4, "type": "text", "no_skip": True,
         "text": "Which competitor is closest to what you want to be?",
         "note": "Competitors found by research, with prices, will be listed here from step 3.",
     },
@@ -125,7 +125,7 @@ QUESTIONS = [
         "note": "The competitor price range will be shown here from step 3.",
     },
     {
-        "id": "q18", "stage": 5, "type": "multi",
+        "id": "q18", "stage": 5, "type": "multi", "adapt_options": True,
         "text": "How will customers find you and buy?",
         "hint": "Pick any that apply, and add your own.",
         "options": [

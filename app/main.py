@@ -1,6 +1,7 @@
-"""Business Idea Checker - local server. Step 1: the form and saved answers."""
+"""Business Idea Checker - local server. The form, saved answers and the Conductor."""
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -8,14 +9,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Union
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .questions import QUESTIONS, QUESTIONS_BY_ID, STAGES
-
 ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
+
+from . import conductor  # noqa: E402  (needs the environment loaded first)
+from .questions import QUESTIONS, QUESTIONS_BY_ID, STAGES  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 STATIC = ROOT / "static"
 REPORTS = ROOT / "reports"
 REPORTS.mkdir(exist_ok=True)
@@ -29,6 +35,10 @@ class Answer(BaseModel):
     value: Optional[Union[str, List[str]]] = None
     other: Optional[str] = None
     dont_know: bool = False
+
+
+class FollowUpAnswer(BaseModel):
+    value: Optional[str] = None
 
 
 def now() -> str:
@@ -58,7 +68,7 @@ def save(session: dict) -> None:
 
 @app.get("/api/questions")
 def get_questions():
-    return {"stages": STAGES, "questions": QUESTIONS}
+    return {"stages": STAGES, "questions": QUESTIONS, "ai": conductor.enabled()}
 
 
 @app.post("/api/sessions")
@@ -81,6 +91,11 @@ def get_session(session_id: str):
     return load(session_id)
 
 
+def shown_text(session: dict, question: dict) -> str:
+    """The question as the person saw it (reworded by the Conductor, if it was)."""
+    return session.get("questions", {}).get(question["id"], {}).get("text", question["text"])
+
+
 @app.put("/api/sessions/{session_id}/answers/{question_id}")
 def put_answer(session_id: str, question_id: str, answer: Answer):
     question = QUESTIONS_BY_ID.get(question_id)
@@ -88,14 +103,40 @@ def put_answer(session_id: str, question_id: str, answer: Answer):
         raise HTTPException(404, "Unknown question")
     session = load(session_id)
     session["answers"][question_id] = {
-        "question": question["text"],
+        "question": shown_text(session, question),
         "value": answer.value,
         "other": answer.other,
         "dont_know": answer.dont_know,
         "answered_at": now(),
     }
     save(session)
-    return session
+
+    # Conductor: reword and skip later questions, and maybe ask one follow-up.
+    follow_up = None
+    if conductor.enabled() and not answer.dont_know:
+        if question_id == conductor.IDEA_QUESTION:
+            follow_up = conductor.plan(session, allow_follow_up=True)
+        elif question["type"] in ("text", "long"):
+            follow_up = conductor.review(session, question_id)
+        if follow_up:
+            session["answers"][question_id]["follow_up"] = {"question": follow_up, "answer": None}
+        save(session)
+    return {"session": session, "follow_up": follow_up}
+
+
+@app.put("/api/sessions/{session_id}/answers/{question_id}/follow_up")
+def put_follow_up(session_id: str, question_id: str, body: FollowUpAnswer):
+    session = load(session_id)
+    answer = session["answers"].get(question_id)
+    if answer is None or not answer.get("follow_up"):
+        raise HTTPException(404, "No follow-up for this question")
+    answer["follow_up"]["answer"] = (body.value or "").strip() or None
+    save(session)
+    # A clearer idea description changes how the later questions should read.
+    if question_id == conductor.IDEA_QUESTION and answer["follow_up"]["answer"] and conductor.enabled():
+        conductor.plan(session, allow_follow_up=False)
+        save(session)
+    return {"session": session}
 
 
 @app.post("/api/sessions/{session_id}/complete")
