@@ -294,11 +294,59 @@ function renderReport(report) {
     el("div", { class: "actions report-actions" },
       el("button", { class: "btn plain", type: "button", onclick: () => { state.view = "done"; render(); } }, "Change an answer and re-run"),
       el("span", { class: "spacer" }),
+      el("button", { class: "btn plain", type: "button", onclick: () => downloadPdf(report) }, "Download PDF"),
       el("button", { class: "btn primary", type: "button", onclick: newIdea }, "Check another idea")),
-    el("div", { class: "file" }, `Saved to reports/${state.session.id}.json`));
+    el("div", { class: "file" }, `Saved to reports/${state.session.id}.json and .html`),
+    usageLine(report.usage));
 
   main.replaceChildren(page);
   window.scrollTo(0, 0);
+  if (!report.stale) saveReportFile(page, report);
+}
+
+function usageLine(u) {
+  if (!u || !u.calls) return null;
+  const cost = u.cost_usd != null ? ` · about $${u.cost_usd.toFixed(2)} at API prices` : "";
+  return el("div", { class: "file" }, `${u.calls} AI calls · ${u.searches || 0} web searches${cost}`);
+}
+
+function reportTitle(report) {
+  const idea = (report.text && report.text.idea_sentence) || "Business idea";
+  const short = idea.length > 60 ? idea.slice(0, 57).replace(/\s+\S*$/, "") + "…" : idea;
+  return `Idea report – ${short} – ${new Date(report.finished_at || Date.now()).toLocaleDateString()}`;
+}
+
+// PDF: the browser's own "Save as PDF", using the print layout in style.css.
+function downloadPdf(report) {
+  const before = document.title;
+  document.title = reportTitle(report);          // becomes the suggested file name
+  const restore = () => { document.title = before; window.removeEventListener("afterprint", restore); };
+  window.addEventListener("afterprint", restore);
+  window.print();
+}
+
+// The rendered report is also saved as a standalone HTML file in reports/,
+// so it opens in any browser without the app running.
+let styleText = null;
+
+async function saveReportFile(page, report) {
+  try {
+    if (styleText === null) styleText = await (await fetch("/static/style.css")).text();
+    const copy = page.cloneNode(true);
+    copy.querySelectorAll(".report-actions, .note.stale, .alert-actions, button.link, .file")
+      .forEach((n) => n.remove());
+    const stamp = new Date(report.finished_at || Date.now()).toLocaleString();
+    const html = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+      `<title>${escapeHtml(reportTitle(report))}</title><style>${styleText}</style></head>` +
+      `<body class="standalone"><main class="main"><div class="brand">Idea Checker · ${escapeHtml(stamp)}</div>` +
+      copy.outerHTML + "</main></body></html>";
+    await api("POST", `/api/sessions/${state.session.id}/report/file`, { html });
+  } catch (err) { /* the JSON is the record; the HTML copy is a convenience */ }
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 }
 
 // One chart at most: money in against money out for a first sale, only when the

@@ -910,12 +910,113 @@ function showAlerts() {
   }
 }
 
+// ---------- history: every saved run, reopened from the reports folder ----------
+
+const VERDICT_SHORT = { pursue: "Pursue", test: "Test small first", drop: "Drop or rethink" };
+let viewBeforeHistory = null;
+
+document.getElementById("history-link").addEventListener("click", () => {
+  if (state.view === "history") return;
+  viewBeforeHistory = state.view;
+  state.view = "history";
+  closeAlerts();
+  render();
+});
+
+function when(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) +
+    ", " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+async function showHistory() {
+  renderProgress(-1);
+  let runs = [];
+  try {
+    runs = await api("GET", "/api/sessions");
+  } catch (err) {
+    main.replaceChildren(el("p", { class: "error" }, "Could not load your reports. Is the app running?"));
+    return;
+  }
+  if (state.view !== "history") return;
+
+  const list = el("div", { class: "list" });
+  for (const run of runs) {
+    const status = run.verdict
+      ? el("span", { class: "rating " + ({ pursue: "good", test: "mid", drop: "bad" })[run.verdict] }, VERDICT_SHORT[run.verdict])
+      : el("span", { class: "muted small" }, run.declined ? "Declined"
+        : run.completed ? "Answers finished, no report yet" : `In progress · ${run.answered} of ${run.questions} answered`);
+    const current = state.session && state.session.id === run.id;
+    list.append(el("button", { class: "row", type: "button", onclick: () => openRun(run.id) },
+      el("span", { class: "qa" },
+        el("div", { class: "a" }, run.title || "No idea chosen yet"),
+        el("div", { class: "q history-meta" }, when(run.created_at), " · ", status,
+          run.verdict && run.confidence ? ` · ${run.confidence} confidence` : "",
+          current ? " · open now" : "")),
+      el("span", { class: "edit" }, "Open")));
+  }
+
+  const back = viewBeforeHistory && state.session
+    ? el("button", {
+      class: "btn plain", type: "button",
+      onclick: () => { state.view = viewBeforeHistory || "question"; render(); },
+    }, "Back")
+    : null;
+  main.replaceChildren(el("div", { class: "screen" },
+    el("h1", {}, "Your reports"),
+    el("p", { class: "lead" }, runs.length
+      ? "Every run is saved in the reports folder. Open one to see its report or carry on where you left off."
+      : "Nothing saved yet. Your first run will appear here."),
+    runs.length ? list : null,
+    el("div", { class: "actions" }, back, el("span", { class: "spacer" }),
+      el("button", { class: "btn primary", type: "button", onclick: newIdea }, "Check another idea"))));
+  window.scrollTo(0, 0);
+}
+
+// Open a saved run: the report if there is one, otherwise where it was left.
+async function openRun(id) {
+  let session;
+  try {
+    session = await api("GET", `/api/sessions/${id}`);
+  } catch (err) {
+    return;
+  }
+  clearInterval(alertTimer);
+  alertTimer = null;
+  state.session = session;
+  localStorage.setItem(STORAGE_KEY, id);
+  state.alerts = session.alerts || [];
+  state.returnToDone = false;
+  state.returnToIndex = null;
+  state.followUp = null;
+  placeSession();
+  startAlertWatch();
+  updateAlertButton();
+  render();
+}
+
+// Decide which screen a loaded session should show.
+function placeSession() {
+  const firstOpen = state.questions.findIndex((q) => asked(q) && !state.session.answers[q.id]);
+  state.index = firstOpen === -1 ? state.questions.length - 1 : firstOpen;
+  if (state.session.declined) state.view = "declined";
+  else if (state.session.completed || firstOpen === -1) state.view = state.ai && state.session.completed ? "report" : "done";
+  else state.view = "question";
+  const pending = pendingFollowUp();
+  if (pending && !state.session.declined) {
+    state.followUp = pending;
+    state.view = "followup";
+  }
+}
+
 // ---------- start ----------
 
 function render() {
   clearInterval(pollTimer);
   clearInterval(reportTimer);
-  if (state.view === "declined") showDeclined();
+  if (state.view === "history") showHistory();
+  else if (state.view === "declined") showDeclined();
   else if (state.view === "report") showReport();
   else if (state.view === "done") showDone();
   else if (state.view === "followup") renderFollowUp();
@@ -938,16 +1039,7 @@ async function start() {
   }
   if (state.session) {
     // Resume where the user left off.
-    const firstOpen = state.questions.findIndex((q) => asked(q) && !state.session.answers[q.id]);
-    if (state.session.completed || firstOpen === -1) state.view = state.ai && state.session.completed ? "report" : "done";
-    else state.index = firstOpen;
-    const pending = pendingFollowUp();
-    if (pending) {
-      state.followUp = pending;
-      state.view = "followup";
-      if (firstOpen === -1) state.index = state.questions.length - 1;
-    }
-    if (state.session.declined) state.view = "declined";
+    placeSession();
     state.alerts = state.session.alerts || [];
     startAlertWatch();
   }

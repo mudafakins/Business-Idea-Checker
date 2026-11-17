@@ -536,3 +536,46 @@ a.src:hover { text-decoration: underline; }
 .idea-evidence { margin-top: 6px; font-size: 12px; color: var(--secondary); }
 .working.inline { padding-top: 40px; }
 .more-loading { display: inline-flex; align-items: center; gap: 6px; }
+
+
+/* Header: History link */
+.brand-row { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+.brand-row .brand { margin-bottom: 0; }
+.history-link {
+  border: 0; background: none; padding: 0;
+  font: inherit; font-size: 13px; font-weight: 600; color: var(--accent); cursor: pointer;
+}
+.history-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.history-meta .rating { margin: 0 2px; text-transform: none; }
+
+/* Standalone saved report */
+body.standalone .main { padding-top: 28px; }
+body.standalone .brand { margin-bottom: 18px; }
+
+/* Print and PDF: always light, no app controls, cards kept whole */
+@media print {
+  :root {
+    --bg: #fff; --card: #fff; --text: #000; --secondary: #555;
+    --separator: #ddd; --fill: #eee; --accent: #0057b8;
+    --amber-text: #9a5300; --green-text: #1b6e33;
+  }
+  @page { margin: 14mm; }
+  body { font-size: 11pt; }
+  .top, .alert-button, .overlay, .report-actions, .note.stale, .alert-actions,
+  button.link, .file { display: none !important; }
+  .main { max-width: none; padding: 0; }
+  .verdict, .scorecard, .table, .alert-card, .test-card, .compare > div, .chart {
+    border: 1px solid var(--separator);
+    box-shadow: none;
+  }
+  .verdict { border-top: 5px solid var(--amber); }
+  .verdict.good { border-top-color: var(--green); }
+  .verdict.bad { border-top-color: var(--red); }
+  .alert-card { border-left: 4px solid var(--amber); }
+  .alert-card.red { border-left-color: var(--red); }
+  .verdict, .alert-card, .test-card, .area, tr, .chart, .compare { break-inside: avoid; }
+  .report h2, .report h3 { break-after: avoid; }
+  .area:not([open]) .area-line { display: block; -webkit-line-clamp: unset; overflow: visible; }
+  .screen { animation: none; }
+  a { color: var(--accent); }
+}

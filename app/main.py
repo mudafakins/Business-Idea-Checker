@@ -89,6 +89,77 @@ def create_session():
     return session
 
 
+# ---------- history: every saved run in reports/ ----------
+
+def _idea_title(session: dict) -> Optional[str]:
+    answers = session.get("answers") or {}
+    pick = answers.get("pick") or {}
+    if pick.get("value"):
+        return pick["value"]
+    idea = (answers.get("q8") or {}).get("value")
+    if idea:
+        return idea if len(idea) <= 90 else idea[:87].rsplit(" ", 1)[0] + "…"
+    return None
+
+
+def _summary(session: dict) -> dict:
+    report = session.get("report") or {}
+    scores = report.get("scores") or {}
+    asked = [q for q in QUESTIONS if not q.get("paths") or path_of(session) in q["paths"]]
+    answered = sum(1 for q in asked if q["id"] in session.get("answers", {}))
+    usage = session.get("usage") or {}
+    return {
+        "id": session["id"],
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
+        "title": _idea_title(session),
+        "path": path_of(session),
+        "completed": bool(session.get("completed")),
+        "declined": bool(session.get("declined")),
+        "answered": answered,
+        "questions": len(asked),
+        "verdict": scores.get("verdict") if report.get("status") == "done" else None,
+        "confidence": scores.get("confidence") if report.get("status") == "done" else None,
+        "report_at": report.get("finished_at") if report.get("status") == "done" else None,
+        "has_file": (REPORTS / ("%s.html" % session["id"])).exists(),
+        "usage": {k: usage.get(k) for k in ("calls", "searches", "cost_usd")},
+    }
+
+
+@app.get("/api/sessions")
+def list_sessions():
+    """Every saved run, newest first, for the History screen."""
+    out = []
+    for path in REPORTS.glob("*.json"):
+        if not SESSION_ID.match(path.stem):
+            continue
+        try:
+            out.append(_summary(json.loads(path.read_text(encoding="utf-8"))))
+        except (ValueError, KeyError, OSError):
+            continue          # a damaged file is skipped, not fatal
+    out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return out
+
+
+class ReportFile(BaseModel):
+    html: str
+
+
+@app.post("/api/sessions/{session_id}/report/file")
+def save_report_file(session_id: str, body: ReportFile):
+    """Saves the rendered report as a standalone HTML file next to its JSON."""
+    session = load(session_id)
+    if (session.get("report") or {}).get("status") != "done":
+        raise HTTPException(409, "No finished report to save")
+    if len(body.html) > 3_000_000:
+        raise HTTPException(413, "Report too large")
+    path = REPORTS / ("%s.html" % session_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(body.html, encoding="utf-8")
+    os.replace(tmp, path)
+    return {"file": "reports/%s.html" % session_id}
+
+
 @app.get("/api/sessions/{session_id}")
 def get_session(session_id: str):
     session = load(session_id)
