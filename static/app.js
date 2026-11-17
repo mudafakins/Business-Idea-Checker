@@ -228,7 +228,7 @@ function renderQuestion() {
   screen.append(actions, error);
   if (state.index === 0 && !state.ai) {
     screen.append(el("p", { class: "file" },
-      "AI is off, so questions use their standard wording. Add your API key to the .env file and restart to turn it on."));
+      "AI is off, so questions use their standard wording."));
   }
 
   main.replaceChildren(screen);
