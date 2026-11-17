@@ -56,7 +56,7 @@ SIGNALS = {
     "F2": ("fit", "The time the person can give matches what the first stage needs."),
     "F3": ("fit", "The person's skills, contacts or access match what the business needs."),
     "F4": ("fit", "The business can start earning within the timeline the person needs."),
-    "R1": ("risk", "No legal, safety or licensing issue was found that could stop the business."),
+    "R1": ("risk", "Nothing found makes the business as described unlawful or unsafe to run, or needs a licence or permission it realistically cannot get."),
     "R2": ("risk", "The business does not depend on one platform, supplier or partner that could end it."),
 }
 
@@ -154,7 +154,7 @@ def _prompt(session: dict) -> str:
 
 # Bump when the Assessor's questions or instructions change, so saved
 # assessments made under the old ones are not reused.
-ASSESS_VERSION = 5
+ASSESS_VERSION = 6
 
 
 def fingerprint(session: dict) -> str:
@@ -408,6 +408,12 @@ def score(assessment: dict, session: dict) -> dict:
     elif len(weak) >= 3:
         verdict = "drop"
         reasons.append("Three or more areas are weak.")
+    elif len(weak) == 2 and any(areas[a]["basis"] == "verified" for a in weak):
+        # Brief: Test small first is for weak areas "that a cheap test could settle".
+        # What verified data already shows, a test cannot undo.
+        verdict = "drop"
+        reasons.append("%s are weak, and verified data already shows it, so a cheap test could not settle it." % _join(
+            [AREA_NAMES[a] for a in weak]))
     elif not weak and areas["demand"]["rating"] == "strong" and areas["money"]["rating"] == "strong":
         verdict = "pursue"
         reasons.append("No weak areas, and Demand and Money are both strong.")

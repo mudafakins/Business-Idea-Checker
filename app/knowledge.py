@@ -104,6 +104,11 @@ orders that needed no new ads and so looks far cheaper. When only cost per click
 work it out as cost per click divided by the share of visitors who buy, and say so in note.
 - For costs, take the cautious end of a benchmark range; for sales and repeat rates, the \
 middle at most. Benchmarks from agencies or sellers of services lean optimistic.
+- R1 is "no" only for a real blocker: the activity itself is prohibited, it is unsafe, or it \
+needs a licence or rights the person realistically cannot get. Rules on how a business may \
+advertise or find clients, claims that need proof, and licences or registrations that can be \
+obtained are things to handle, not blockers: answer "yes" or "unclear" and say what must be \
+done in note.
 - When the evidence is missing, answer "unclear"; never assume the favourable answer."""
 
 WRITER = """HOW TO WRITE THE NEXT STEPS LIKE AN EXPERT
