@@ -19,7 +19,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 from typing_extensions import Literal
 
-from . import ai
+from . import ai, knowledge
 from .questions import QUESTIONS, QUESTIONS_BY_ID, path_of, visible
 
 IDEA_QUESTION = "q8"
@@ -177,7 +177,7 @@ def plan(session: dict, allow_follow_up: bool) -> Optional[str]:
         _said_so_far(session), _describe(todo, session))
     if not allow_follow_up:
         user += "\n\nThe follow-up for the idea has already been used. Return null for follow_up."
-    result = _call(session, "plan", PLAN_SYSTEM, user, Plan, max_tokens=8000, timeout=60.0)
+    result = _call(session, "plan", PLAN_SYSTEM + knowledge.for_role("conductor"), user, Plan, max_tokens=8000, timeout=60.0)
     if result is None:
         return None
     if (result.decline_reason or "").strip():
@@ -210,7 +210,7 @@ def review(session: dict, question_id: str) -> Optional[str]:
     user = "What the person has said so far:\n%s\n\nThe answer to review:\n- %s\n   %s\n\nRemaining questions:\n%s" % (
         _said_so_far(session), answered["question"], _answer_text(answered),
         _describe(todo, session) or "(none)")
-    result = _call(session, "review:" + question_id, REVIEW_SYSTEM, user, Review, max_tokens=4000, timeout=30.0)
+    result = _call(session, "review:" + question_id, REVIEW_SYSTEM + knowledge.for_role("conductor"), user, Review, max_tokens=4000, timeout=30.0)
     if result is None:
         return None
     _apply_skips(session, result.skips, todo)

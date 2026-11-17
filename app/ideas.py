@@ -16,7 +16,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
-from . import ai
+from . import ai, knowledge
 from .checker import _answer_text
 
 STAGE_ONE = [("q2", "Where"), ("q3", "Money they can put in"), ("q4", "Time each week"),
@@ -138,7 +138,7 @@ def rank(session: dict) -> Optional[List[dict]]:
         return None
     user = "WHAT THE PERSON TOLD YOU\n%s\n\nTHEIR IDEAS\n%s" % (
         _stage_one(session), "\n".join("- " + i for i in ideas))
-    found = ai.call(session, "ideas:rank", RANK_SYSTEM, user, Ideas,
+    found = ai.call(session, "ideas:rank", RANK_SYSTEM + knowledge.for_role("ideas"), user, Ideas,
                     max_tokens=16000, timeout=420.0, effort="low", web=True)
     return order(_clean(found, 0)) if found else None
 
@@ -152,7 +152,7 @@ def suggest(session: dict, existing: List[dict]) -> Optional[List[dict]]:
     if existing:
         lines.append("\nALREADY SUGGESTED (suggest five different ones)")
         lines += ["- %s: %s" % (i["title"], i["description"]) for i in existing]
-    found = ai.call(session, "ideas:suggest", SUGGEST_SYSTEM, "\n".join(lines), Ideas,
+    found = ai.call(session, "ideas:suggest", SUGGEST_SYSTEM + knowledge.for_role("ideas"), "\n".join(lines), Ideas,
                     max_tokens=16000, timeout=420.0, effort="low", web=True)
     if not found:
         return None

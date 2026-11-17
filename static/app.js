@@ -387,6 +387,16 @@ function renderQuestion() {
     screen.append(el("p", { class: "file" },
       "AI is off, so questions use their standard wording."));
   }
+  if (state.index === 0 && state.ai && !state.returnToDone) {
+    screen.append(el("button", {
+      class: "quick-card", type: "button",
+      onclick: () => { state.view = "quick"; render(); },
+    },
+      el("span", { class: "qa" },
+        el("div", { class: "quick-title" }, "Quick mode"),
+        el("div", { class: "q" }, "Short on time? Write everything about your idea in one go and get the report straight away.")),
+      el("span", { class: "edit" }, "›")));
+  }
 
   main.replaceChildren(screen);
   refresh();
@@ -773,6 +783,10 @@ function newIdea() {
   updateAlertButton();
   state.index = 0;
   state.view = "question";
+  state.returnToDone = false;
+  state.returnToIndex = null;
+  state.followUp = null;
+  window.scrollTo(0, 0);
   render();
 }
 
@@ -910,10 +924,88 @@ function showAlerts() {
   }
 }
 
+// ---------- quick mode: one text box instead of the form ----------
+
+let quickDraft = "";
+
+const QUICK_PROMPTS = [
+  "The idea: what you will sell, and to whom",
+  "Where you will run it, how much money and time you can put in",
+  "What you are good at or have access to, and what you refuse to do",
+  "Who buys, what problem it solves, and what they use today",
+  "Competitors you know, and what you will do differently",
+  "Your price, how customers will find you, how often they buy, and your cost per sale",
+];
+
+function showQuick() {
+  state.view = "quick";
+  renderProgress(2);
+  stageName.textContent = "Quick mode";
+  const error = el("div", { class: "error", role: "alert" });
+  const go = el("button", { class: "btn primary", type: "button", onclick: submit }, "Get my report");
+  const input = el("textarea", {
+    class: "field quick-field",
+    "aria-label": "Everything about your idea",
+    placeholder: "Write as much or as little as you like, in your own words. Anything you leave out is treated as unknown.",
+    oninput: (e) => { quickDraft = e.target.value; refresh(); },
+    onkeydown: (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } },
+  });
+  input.value = quickDraft;
+  const refresh = () => { go.disabled = quickDraft.trim().length < 40; };
+
+  async function submit() {
+    if (go.disabled || go.dataset.busy) return;
+    go.dataset.busy = "1";
+    showWorking("Reading everything you wrote…");
+    const res = await fetch("/api/sessions/quick", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: quickDraft }),
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      const detail = res ? (await res.json().catch(() => ({}))).detail : null;
+      showQuick();
+      main.querySelector(".error").textContent = detail || SAVE_ERROR;
+      return;
+    }
+    const data = await res.json();
+    quickDraft = "";
+    clearInterval(alertTimer);
+    alertTimer = null;
+    state.session = data.session;
+    localStorage.setItem(STORAGE_KEY, state.session.id);
+    state.alerts = [];
+    startAlertWatch();
+    if (state.session.declined) return showDeclined();
+    state.index = state.questions.length - 1;
+    state.view = "report";
+    render();
+  }
+
+  main.replaceChildren(el("div", { class: "screen" },
+    el("h1", {}, "Tell us everything about your idea"),
+    el("p", { class: "hint" }, "It helps to cover:"),
+    el("ul", { class: "quick-prompts" }, ...QUICK_PROMPTS.map((t) => el("li", {}, t))),
+    input,
+    el("div", { class: "actions" },
+      el("button", { class: "btn plain", type: "button", onclick: () => { state.view = "question"; state.index = 0; render(); } }, "Use the full form"),
+      el("span", { class: "spacer" }),
+      go),
+    error,
+    el("p", { class: "file" }, "You can check and correct what was understood afterwards, under “Change an answer”.")));
+  refresh();
+  input.focus();
+}
+
 // ---------- history: every saved run, reopened from the reports folder ----------
 
 const VERDICT_SHORT = { pursue: "Pursue", test: "Test small first", drop: "Drop or rethink" };
 let viewBeforeHistory = null;
+
+// Start new: a fresh check. The current one stays saved in History.
+document.getElementById("new-link").addEventListener("click", () => {
+  closeAlerts();
+  newIdea();
+});
 
 document.getElementById("history-link").addEventListener("click", () => {
   if (state.view === "history") return;
@@ -1016,6 +1108,7 @@ function render() {
   clearInterval(pollTimer);
   clearInterval(reportTimer);
   if (state.view === "history") showHistory();
+  else if (state.view === "quick") showQuick();
   else if (state.view === "declined") showDeclined();
   else if (state.view === "report") showReport();
   else if (state.view === "done") showDone();

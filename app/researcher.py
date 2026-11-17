@@ -29,7 +29,13 @@ from urllib.parse import urlparse
 from pydantic import BaseModel
 from typing_extensions import Literal
 
-from . import ai
+from . import ai, cache, knowledge
+
+# Research for the same idea in the same place is reused for this long, so a
+# second check of an idea works from the same data. Bump RESEARCH_VERSION when
+# the research instructions change, so older findings are not reused.
+CACHE_DAYS = 7
+RESEARCH_VERSION = 3
 
 JOB = "competitors"
 IDEA_QUESTION = "q8"
@@ -267,22 +273,44 @@ def _context(session: dict) -> List[str]:
     return lines
 
 
+def _cache_name(job: str, session: dict) -> str:
+    """Same idea, same place: same research. Wording case and spacing don't matter."""
+    norm = lambda t: " ".join((t or "").lower().split())
+    return "research-%s-%s" % (job, cache.key(RESEARCH_VERSION, job, norm(idea_text(session)),
+                                               norm(_answer(session, "q2"))))
+
+
+def reused(job: str, session: dict) -> Optional[dict]:
+    hit = cache.get(_cache_name(job, session), CACHE_DAYS)
+    if not hit:
+        return None
+    return dict(hit["value"], reused_from=hit.get("saved_on"))
+
+
+def remember(job: str, session: dict, result: dict) -> dict:
+    cache.put(_cache_name(job, session), result)
+    return result
+
+
 def run(session: dict) -> Optional[dict]:
     """Research competitors and prices. Logs usage on `session`; returns the results or None."""
     if not idea_text(session):
         return None
-    found = ai.call(session, "research:" + JOB, SYSTEM, "\n".join(_context(session)), Findings,
+    hit = reused(JOB, session)
+    if hit:
+        return hit
+    found = ai.call(session, "research:" + JOB, SYSTEM + knowledge.for_role("research"), "\n".join(_context(session)), Findings,
                     max_tokens=16000, timeout=420.0, effort="medium", web=True)
     if found is None:
         return None
     competitors = _clean(found)
     rng = price_range(competitors)
-    return {
+    return remember(JOB, session, {
         "competitors": competitors,
         "price_range": rng,
         "market_note": (found.market_note or "").strip() or None,
         "facts": to_facts(competitors, rng),
-    }
+    })
 
 
 # ---------- market, demand, costs, rules ----------
@@ -373,8 +401,12 @@ def run_market(session: dict) -> Optional[dict]:
     """Research the market, costs and rules. Logs usage on `session`; returns the results or None."""
     if not idea_text(session):
         return None
-    found = ai.call(session, "research:" + MARKET_JOB, MARKET_SYSTEM, "\n".join(_context(session)),
+    hit = reused(MARKET_JOB, session)
+    if hit:
+        return hit
+    found = ai.call(session, "research:" + MARKET_JOB, MARKET_SYSTEM + knowledge.for_role("research"), "\n".join(_context(session)),
                     MarketFindings, max_tokens=16000, timeout=420.0, effort="medium", web=True)
     if found is None:
         return None
-    return {"market_note": (found.market_note or "").strip() or None, "facts": _clean_market(found)}
+    return remember(MARKET_JOB, session,
+                    {"market_note": (found.market_note or "").strip() or None, "facts": _clean_market(found)})

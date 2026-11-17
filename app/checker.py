@@ -23,7 +23,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 from typing_extensions import Literal
 
-from . import ai
+from . import ai, knowledge
 from .questions import QUESTIONS, QUESTIONS_BY_ID
 
 RED_CATEGORIES = {"non_negotiable", "loses_money", "legal"}
@@ -132,7 +132,7 @@ def _prompt(session: dict) -> str:
 
 def run(session: dict) -> Optional[List[dict]]:
     """Check the answers against the findings. Returns cleaned alerts, or None if the check failed."""
-    result = ai.call(session, "check", SYSTEM, _prompt(session), Check,
+    result = ai.call(session, "check", SYSTEM + knowledge.for_role("checker"), _prompt(session), Check,
                      max_tokens=8000, timeout=120.0, effort="medium")
     if result is None:
         return None

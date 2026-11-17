@@ -187,6 +187,8 @@ function renderReport(report) {
   if (t.customer) plan.append(el("h3", {}, "Customer"), para(t.customer));
   plan.append(el("h3", {}, "Market"));
   if (t.market) plan.append(para(t.market));
+  const prices = priceChart(report, m);
+  if (prices) plan.append(prices);
   const comps = (report.competitors || []).filter((c) => c.price != null).slice(0, 5);
   if (comps.length) {
     plan.append(el("table", { class: "table" },
@@ -216,11 +218,12 @@ function renderReport(report) {
   ];
   plan.append(el("table", { class: "table money" },
     el("tbody", {}, ...rows.map(([label, value]) => el("tr", {}, el("td", {}, label), el("td", {}, value))))));
-  const chart = moneyChart(m);
-  if (chart) plan.append(chart);
+  for (const chart of [saleChart(m), lifetimeChart(m)]) if (chart) plan.append(chart);
   if (t.money_summary) plan.append(para(t.money_summary));
 
   plan.append(el("h3", {}, "Start-up budget"));
+  const budget = budgetChart(m);
+  if (budget) plan.append(budget);
   if ((m.startup_items || []).length) {
     plan.append(el("table", { class: "table" }, el("tbody", {},
       ...m.startup_items.map((it) => el("tr", {}, el("td", {}, it.item),
@@ -275,6 +278,8 @@ function renderReport(report) {
       el("strong", {}, s.confidence), ". Tags: ",
       tagChip("verified"), " read on a source page, ", tagChip("estimated"), " worked out with reasoning shown, ",
       tagChip("assumed"), " your own figure or no evidence."));
+  const evidence = evidenceChart(report);
+  if (evidence) sure.append(evidence);
   if ((t.what_would_change || []).length) {
     sure.append(el("h3", {}, "What would change the verdict"), el("ul", {}, ...t.what_would_change.map((w) => el("li", {}, rich(w)))));
   }
@@ -347,24 +352,4 @@ async function saveReportFile(page, report) {
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-}
-
-// One chart at most: money in against money out for a first sale, only when the
-// numbers are solid (all three known, at most one of them the person's own guess).
-function moneyChart(m) {
-  const parts = [m.price, m.cost_per_sale, m.customer_cost];
-  if (parts.some((n) => !n || n.value == null)) return null;
-  if (parts.filter((n) => n.tag === "assumed").length > 1) return null;
-  const inn = m.price.value;
-  const out = m.cost_per_sale.value + m.customer_cost.value;
-  const max = Math.max(inn, out) || 1;
-  const bar = (label, value, cls) => el("div", { class: "bar-row" },
-    el("span", { class: "bar-label" }, label),
-    el("span", { class: "bar " + cls, style: `width:${Math.max(4, (value / max) * 100)}%` }),
-    el("span", { class: "bar-value" }, money(value, m.currency)));
-  return el("div", { class: "chart", role: "img", "aria-label": `First sale: ${money(inn, m.currency)} in, ${money(out, m.currency)} out` },
-    el("div", { class: "muted small" }, "First sale: money in against money out"),
-    bar("In", inn, "in"),
-    bar("Out", out, "out"),
-    el("div", { class: "muted small" }, "Out = cost to deliver one sale + cost to win the customer."));
 }

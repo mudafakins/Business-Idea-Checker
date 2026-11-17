@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 from typing_extensions import Literal
 
-from . import ai
+from . import ai, cache, knowledge
 from .checker import _answer_text
 from .questions import QUESTIONS
 
@@ -52,6 +52,7 @@ SIGNALS = {
     "C1": ("competition", "There is a real gap that current competitors do not fill."),
     "C2": ("competition", "The person's stated difference is not already claimed by competitors."),
     "C3": ("competition", "That difference would be hard for competitors to copy."),
+    "F1": ("fit", "The idea as described breaks none of the person's non-negotiables (what they said they refuse to do)."),
     "F2": ("fit", "The time the person can give matches what the first stage needs."),
     "F3": ("fit", "The person's skills, contacts or access match what the business needs."),
     "F4": ("fit", "The business can start earning within the timeline the person needs."),
@@ -133,7 +134,7 @@ got it."""
 
 def _system() -> str:
     lines = ["- %s (%s): %s" % (sid, area, text) for sid, (area, text) in SIGNALS.items()]
-    return SYSTEM % "\n".join(lines)
+    return SYSTEM % "\n".join(lines) + knowledge.for_role("assessor")
 
 
 def _prompt(session: dict) -> str:
@@ -153,7 +154,7 @@ def _prompt(session: dict) -> str:
 
 # Bump when the Assessor's questions or instructions change, so saved
 # assessments made under the old ones are not reused.
-ASSESS_VERSION = 2
+ASSESS_VERSION = 5
 
 
 def fingerprint(session: dict) -> str:
@@ -161,15 +162,26 @@ def fingerprint(session: dict) -> str:
     answers = {qid: [a.get("value"), a.get("other"), a.get("dont_know"),
                      (a.get("follow_up") or {}).get("answer")]
                for qid, a in sorted(session["answers"].items())}
-    facts = [[f["id"], f["claim"], f["tag"]] for f in session.get("facts") or []]
+    # Sorted, so the order the research jobs happened to finish in doesn't matter.
+    facts = sorted([f["id"], f["claim"], f["tag"]] for f in session.get("facts") or [])
     raw = json.dumps({"v": ASSESS_VERSION, "answers": answers, "facts": facts}, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def assess(session: dict) -> Optional[dict]:
+    """The evidence for these answers and findings: reused if already gathered, so the
+    same answers and data always give the same verdict, in any session."""
+    name = "assess-" + fingerprint(session)
+    hit = cache.get(name)
+    if hit:
+        return hit["value"]
     result = ai.call(session, "assess", _system(), _prompt(session), Assessment,
                      max_tokens=12000, timeout=240.0, effort="medium")
-    return result.model_dump() if result else None
+    if result is None:
+        return None
+    data = result.model_dump()
+    cache.put(name, data)
+    return data
 
 
 # ---------- scoring: fixed rules, plain code ----------
@@ -284,9 +296,9 @@ def score(assessment: dict, session: dict) -> dict:
     sig = _signal_map(assessment, facts)
     money = money_numbers(assessment, facts, session)
     v = {sid: s["value"] for sid, s in sig.items()}
-    alerts = [a for a in session.get("alerts") or [] if a.get("status") == "open"]
-    broken = [a for a in alerts if a["category"] == "non_negotiable" and a["severity"] == "red"]
-    legal_red = [a for a in alerts if a["category"] == "legal" and a["severity"] == "red"]
+    # The verdict rests only on the answers and the (saved) assessment, never on
+    # the Checker's alerts, so the same answers and data always give the same verdict.
+    broken = v["F1"] == "no"
     spoken = _spoken_to(session)
     areas = {}
 
@@ -301,7 +313,9 @@ def score(assessment: dict, session: dict) -> dict:
     # Demand
     if v["D1"] == "no":
         r, why = "weak", "No sign that people already pay to solve this problem."
-    elif v["D1"] == "yes" and v["D2"] == "yes" and spoken in ("many", "paying"):
+    elif v["D1"] == "yes" and spoken == "paying":
+        r, why = "strong", "People already pay for this, and you already have paying customers."
+    elif v["D1"] == "yes" and v["D2"] == "yes" and spoken == "many":
         r, why = "strong", "People already pay for this, buying is active, and you have spoken to many buyers."
     else:
         r, why = "okay", "Some evidence of demand, but not yet proven with your own buyers."
@@ -348,7 +362,7 @@ def score(assessment: dict, session: dict) -> dict:
     budget = money["budget"]["value"]
     startup = money["startup_total"]["value"]
     within = None if budget is None or startup is None else startup <= budget
-    fit_tags = tags_of("F2", "F3", "F4") + ([money["startup_total"]["tag"]] if startup else [])
+    fit_tags = tags_of("F1", "F2", "F3", "F4") + ([money["startup_total"]["tag"]] if startup else [])
     if broken:
         r, why = "weak", "The idea breaks one of your non-negotiables."
     elif within is False:
@@ -357,10 +371,10 @@ def score(assessment: dict, session: dict) -> dict:
         r, why = "strong", "It fits your budget, time, skills and timeline."
     else:
         r, why = "okay", "It mostly fits, with some gaps in budget, time, skills or timeline."
-    area("fit", r, why, fit_tags, {"within_budget": within, "broken_non_negotiables": [a["key"] for a in broken]})
+    area("fit", r, why, fit_tags, {"within_budget": within, "breaks_non_negotiable": broken})
 
     # Risk
-    blocking = v["R1"] == "no" or bool(legal_red)
+    blocking = v["R1"] == "no"
     if blocking:
         r, why = "weak", "A legal, safety or licensing issue could stop the business."
     elif v["R1"] == "yes" and v["R2"] == "yes":

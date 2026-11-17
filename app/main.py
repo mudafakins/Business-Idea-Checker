@@ -21,7 +21,7 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-from . import checker, conductor, ideas, researcher, scorer, writer  # noqa: E402  (need the environment loaded first)
+from . import checker, conductor, ideas, quick, researcher, scorer, writer  # noqa: E402  (need the environment loaded first)
 from .questions import QUESTIONS, QUESTIONS_BY_ID, STAGES, path_of  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -160,6 +160,50 @@ def save_report_file(session_id: str, body: ReportFile):
     return {"file": "reports/%s.html" % session_id}
 
 
+# ---------- quick mode: one block of text instead of the form ----------
+
+class QuickRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/sessions/quick")
+def quick_session(body: QuickRequest):
+    """Sorts a free-form description into the form's answers, then goes straight
+    to research and the report, like a finished form."""
+    text = (body.text or "").strip()
+    if len(text) < 40:
+        raise HTTPException(422, "Please write a little more about the idea.")
+    if len(text) > 20000:
+        raise HTTPException(413, "That is too long. Please keep it under 20,000 characters.")
+    if not conductor.enabled():
+        raise HTTPException(503, "Quick mode needs the AI, which is not available.")
+
+    session = create_session()
+    session_id = session["id"]
+    found = quick.extract(session, text)
+    if found is None or (not (found.q8_idea or "").strip() and not found.decline_reason):
+        # Nothing usable: don't leave an empty run in History.
+        session_path(session_id).unlink(missing_ok=True)
+        if found is None:
+            raise HTTPException(502, "The description could not be read this time. Please try again.")
+        raise HTTPException(422, "Please describe the idea itself: what you will sell, and to whom.")
+
+    with _locks[session_id]:
+        session["mode"] = "quick"
+        session["quick_text"] = text
+        session["business_type"] = found.business_type
+        session["answers"] = quick.to_answers(found, now())
+        if (found.decline_reason or "").strip():
+            session["declined"] = found.decline_reason.strip()
+            save(session)
+            return {"session": session}
+        session["completed"] = True
+        save(session)
+    start_research(session_id)
+    start_report(session_id)
+    return {"session": load(session_id)}
+
+
 @app.get("/api/sessions/{session_id}")
 def get_session(session_id: str):
     session = load(session_id)
@@ -296,6 +340,7 @@ def _research_job(session_id: str, job: str, idea: str, snapshot: dict) -> None:
             else:
                 state["status"] = "done"
                 state["market_note"] = result.get("market_note")
+                state["reused_from"] = result.get("reused_from")
                 if job == researcher.JOB:
                     state.update(competitors=result["competitors"], price_range=result["price_range"])
                 others = [f for f in session.get("facts", []) if f.get("job") != job]
@@ -692,11 +737,7 @@ def _report_job(session_id: str) -> None:
             snapshot = load(session_id)
         calls_before = len(snapshot.get("usage", {}).get("log", []))
         fp = scorer.fingerprint(snapshot)
-        saved = snapshot.get("assessment") or {}
-        if saved.get("fingerprint") == fp:
-            assessment = saved["data"]
-        else:
-            assessment = scorer.assess(snapshot)
+        assessment = scorer.assess(snapshot)      # reused when the answers and findings are unchanged
         if assessment is None:
             with _locks[session_id]:
                 session = load(session_id)
@@ -721,7 +762,11 @@ def _report_job(session_id: str) -> None:
                 competitors=(session.get("research") or {}).get("competitors") or [],
                 price_range=(session.get("research") or {}).get("price_range"),
                 notes=[n for n in ((session.get("research") or {}).get("market_note"),
-                                   (session.get("market_research") or {}).get("market_note")) if n],
+                                   (session.get("market_research") or {}).get("market_note")) if n] + (
+                    ["The research was reused from a check of the same idea on %s, so the same answers give "
+                     "the same verdict. It refreshes after %d days." % (
+                         (session.get("research") or {}).get("reused_from"), researcher.CACHE_DAYS)]
+                    if (session.get("research") or {}).get("reused_from") else []),
                 usage={k: (session.get("usage") or {}).get(k) for k in
                        ("calls", "input_tokens", "output_tokens", "searches", "cost_usd")},
             )
@@ -756,6 +801,15 @@ def make_report(session_id: str):
 @app.get("/")
 def index():
     return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.middleware("http")
+async def no_stale_files(request, call_next):
+    """Browsers re-check the app's files on each load, so an update is never half-applied."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

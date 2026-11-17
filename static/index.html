@@ -4,19 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Business Idea Checker</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
   <header class="top">
     <div class="brand-row">
       <div class="brand">Idea Checker</div>
-      <button class="history-link" id="history-link" type="button">History</button>
+      <div class="header-links">
+        <button class="history-link" id="new-link" type="button">Start new</button>
+        <button class="history-link" id="history-link" type="button">History</button>
+      </div>
     </div>
     <div class="progress" id="progress" aria-hidden="true"></div>
     <div class="stage-name" id="stage-name"></div>
   </header>
   <main id="main" class="main"></main>
-  <script src="/static/app.js"></script>
-  <script src="/static/report.js"></script>
+  <script src="/static/app.js?v=9"></script>
+  <script src="/static/charts.js?v=9"></script>
+  <script src="/static/report.js?v=9"></script>
 </body>
 </html>

@@ -11,7 +11,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 from typing_extensions import Literal
 
-from . import ai
+from . import ai, knowledge
 from .checker import _answer_text
 from .questions import QUESTIONS
 
@@ -119,6 +119,6 @@ def _prompt(session: dict, scores: dict) -> str:
 
 
 def write(session: dict, scores: dict) -> Optional[dict]:
-    result = ai.call(session, "write", SYSTEM, _prompt(session, scores), Report,
+    result = ai.call(session, "write", SYSTEM + knowledge.for_role("writer"), _prompt(session, scores), Report,
                      max_tokens=16000, timeout=300.0, effort="medium")
     return result.model_dump() if result else None
