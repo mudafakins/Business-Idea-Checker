@@ -100,7 +100,8 @@ function research() {
 function money(amount, currency) {
   if (amount == null) return "";
   try {
-    return new Intl.NumberFormat(undefined, {
+    // Rupees read naturally in lakh grouping (₹10,00,000).
+    return new Intl.NumberFormat(currency === "INR" ? "en-IN" : undefined, {
       style: "currency", currency: currency || "USD",
       // Whole numbers for anything over 100; pennies only matter on small prices.
       maximumFractionDigits: amount % 1 === 0 || amount >= 100 ? 0 : 2,
@@ -511,7 +512,8 @@ async function advance(afterFollowUp) {
   if (state.ai) showWorking("Checking your answers…");
   state.session = await api("POST", `/api/sessions/${state.session.id}/complete`);
   if (pendingFollowUp()) return advance(true);
-  showDone();
+  state.view = state.ai ? "report" : "done";
+  render();
 }
 
 // ---------- finish screen ----------
@@ -532,9 +534,10 @@ function showDone() {
   renderProgress(6);
 
   const screen = el("div", { class: "screen" },
-    el("h1", {}, "Your answers are saved"),
-    el("p", { class: "lead" },
-      "The report will appear here once research and scoring are built. Tap any answer to change it."));
+    el("h1", {}, "Your answers"),
+    el("p", { class: "lead" }, state.ai
+      ? "Tap any answer to change it, then update your report."
+      : "Your answers are saved. The report needs the AI, which is off."));
 
   for (const stage of state.stages) {
     const qs = state.questions.filter((q) => q.stage === stage.id);
@@ -561,58 +564,39 @@ function showDone() {
     screen.append(el("div", { class: "section-title" }, stage.name), list);
   }
 
-  const open = openAlerts();
-  if (open.length) {
-    screen.append(el("div", { class: "section-title" }, "Alerts"));
-    const list = el("div", { class: "alert-list" });
-    for (const alert of open) list.append(alertCard(alert));
-    screen.append(list);
-  }
-
-  const r = research();
-  if (r.status !== "none") {
-    screen.append(el("div", { class: "section-title" }, "Research"));
-    if (r.status === "done" && (r.competitors || []).length) {
-      const list = el("div", { class: "list" });
-      for (const c of r.competitors) {
-        list.append(el("div", { class: "row static" },
-          el("span", { class: "qa" },
-            el("div", { class: "a" }, competitorLabel(c)),
-            el("div", { class: "q" }, competitorDetail(c) + (c.pitch ? ` · “${c.pitch}”` : ""))),
-          c.source_url
-            ? el("a", { class: "edit", href: c.source_url, target: "_blank", rel: "noopener noreferrer" }, "Source")
-            : null));
-      }
-      screen.append(list);
-      if (r.price_range) screen.append(el("p", { class: "lead small" }, rangeText(r.price_range)));
-      if (r.market_note) screen.append(el("p", { class: "lead small" }, r.market_note));
-    } else {
-      const box = researchBox("competitors");
-      if (box) screen.append(box);
-      watchResearch(showDone);
-    }
-  }
-
   screen.append(
     el("div", { class: "file" }, `Saved to reports/${state.session.id}.json`),
     el("div", { class: "actions" },
+      state.ai && state.session.completed
+        ? el("button", { class: "btn plain", type: "button", onclick: () => { state.view = "report"; render(); } }, "Back to report")
+        : null,
       el("span", { class: "spacer" }),
-      el("button", {
-        class: "btn primary", type: "button",
-        onclick: () => {
-          localStorage.removeItem(STORAGE_KEY);
-          state.session = null;
-          state.alerts = [];
-          state.checking = false;
-          updateAlertButton();
-          state.index = 0;
-          state.view = "question";
-          render();
-        },
-      }, "Check another idea")));
+      state.ai
+        ? el("button", {
+          class: "btn primary", type: "button",
+          onclick: async () => {
+            await api("POST", `/api/sessions/${state.session.id}/report`);
+            state.view = "report";
+            render();
+          },
+        }, "Update report")
+        : el("button", { class: "btn primary", type: "button", onclick: newIdea }, "Check another idea")));
 
   main.replaceChildren(screen);
   window.scrollTo(0, 0);
+}
+
+function newIdea() {
+  localStorage.removeItem(STORAGE_KEY);
+  state.session = null;
+  state.alerts = [];
+  state.checking = false;
+  clearInterval(alertTimer);
+  alertTimer = null;
+  updateAlertButton();
+  state.index = 0;
+  state.view = "question";
+  render();
 }
 
 // ---------- alerts ----------
@@ -651,10 +635,6 @@ async function refreshAlerts() {
     state.alerts = data.alerts;
     state.checking = data.checking;
     updateAlertButton();
-    if (state.view === "done" && !document.querySelector(".sheet")) {
-      const shown = main.querySelectorAll(".alert-card").length;
-      if (shown !== openAlerts().length) showDone();
-    }
   } catch (err) { /* try again on the next tick */ }
 }
 
@@ -757,7 +737,9 @@ function showAlerts() {
 
 function render() {
   clearInterval(pollTimer);
-  if (state.view === "done") showDone();
+  clearInterval(reportTimer);
+  if (state.view === "report") showReport();
+  else if (state.view === "done") showDone();
   else if (state.view === "followup") renderFollowUp();
   else renderQuestion();
 }
@@ -779,7 +761,7 @@ async function start() {
   if (state.session) {
     // Resume where the user left off.
     const firstOpen = state.questions.findIndex((q) => !state.session.answers[q.id]);
-    if (state.session.completed || firstOpen === -1) state.view = "done";
+    if (state.session.completed || firstOpen === -1) state.view = state.ai && state.session.completed ? "report" : "done";
     else state.index = firstOpen;
     const pending = pendingFollowUp();
     if (pending) {

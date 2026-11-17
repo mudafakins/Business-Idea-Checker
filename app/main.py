@@ -1,4 +1,4 @@
-"""Business Idea Checker - local server. The form, saved answers, the Conductor, Researcher and Checker."""
+"""Business Idea Checker - local server: the form, Conductor, Researcher, Checker, Scorer and Writer."""
 
 import json
 import logging
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-from . import checker, conductor, researcher  # noqa: E402  (need the environment loaded first)
+from . import checker, conductor, researcher, scorer, writer  # noqa: E402  (need the environment loaded first)
 from .questions import QUESTIONS, QUESTIONS_BY_ID, STAGES  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -425,7 +425,139 @@ def complete_session(session_id: str):
         session = load(session_id)
         session["completed"] = not has_pending_follow_up(session)
         save(session)
+    if session["completed"]:
+        start_report(session_id)
+        session = load(session_id)
     return session
+
+
+# ---------- the report ----------
+#
+# Built in the background once the form is finished: wait for research and the
+# Checker, gather evidence (Assessor), score it (fixed rules in code), then
+# write it up (Writer). The form shows each stage while it waits.
+
+_reports = {}   # session id -> the report thread running in this server
+
+STAGES_TEXT = {
+    "research": "Finishing the research on competitors and the market",
+    "checking": "Checking your answers against the research",
+    "scoring": "Scoring the six areas",
+    "writing": "Writing your report",
+}
+
+
+def _set_report(session_id: str, **fields) -> None:
+    with _locks[session_id]:
+        session = load(session_id)
+        report = session.get("report") or {}
+        report.update(fields)
+        if "stage" in fields:
+            report["message"] = STAGES_TEXT.get(fields["stage"], "")
+        session["report"] = report
+        save(session)
+
+
+def start_report(session_id: str) -> None:
+    thread = _reports.get(session_id)
+    if thread and thread.is_alive():
+        return
+    if not conductor.enabled():
+        _set_report(session_id, status="failed", error="The AI is not available, so a report cannot be made.")
+        return
+    with _locks[session_id]:
+        session = load(session_id)
+        previous = session.get("report") or {}
+        session["report"] = {"status": "preparing", "stage": "research", "message": STAGES_TEXT["research"],
+                             "started_at": now(), "previous_verdict": (previous.get("scores") or {}).get("verdict")}
+        save(session)
+    thread = threading.Thread(target=_report_job, args=(session_id,), daemon=True)
+    _reports[session_id] = thread
+    thread.start()
+
+
+def _report_job(session_id: str) -> None:
+    log = logging.getLogger("report")
+    try:
+        # 1. Research still running finishes first (each job has its own time limit).
+        start_research(session_id)
+        for job in JOBS:
+            thread = _research.get((session_id, job))
+            if thread:
+                thread.join(450)
+
+        # 2. Let the Checker catch up with the final answers and findings.
+        _set_report(session_id, stage="checking")
+        schedule_check(session_id)
+        state = _checks.get(session_id)
+        if state:
+            state["thread"].join(240)
+
+        # 3. Evidence, reused while the answers and findings are unchanged.
+        _set_report(session_id, stage="scoring")
+        with _locks[session_id]:
+            snapshot = load(session_id)
+        calls_before = len(snapshot.get("usage", {}).get("log", []))
+        fp = scorer.fingerprint(snapshot)
+        saved = snapshot.get("assessment") or {}
+        if saved.get("fingerprint") == fp:
+            assessment = saved["data"]
+        else:
+            assessment = scorer.assess(snapshot)
+        if assessment is None:
+            with _locks[session_id]:
+                session = load(session_id)
+                merge_usage(session, snapshot, calls_before)
+                session["report"].update(status="failed", error="The evidence could not be gathered. Try again.")
+                save(session)
+            return
+        scores = scorer.score(assessment, snapshot)
+
+        # 4. The write-up. If it fails, the report still shows the scores.
+        _set_report(session_id, stage="writing")
+        text = writer.write(snapshot, scores)
+
+        with _locks[session_id]:
+            session = load(session_id)
+            merge_usage(session, snapshot, calls_before)
+            session["assessment"] = {"fingerprint": fp, "data": assessment}
+            session["report"].update(
+                status="done", stage=None, message=None, finished_at=now(), fingerprint=fp,
+                scores=scores, text=text, writer_failed=text is None,
+                alerts=session.get("alerts") or [], facts=session.get("facts") or [],
+                competitors=(session.get("research") or {}).get("competitors") or [],
+                price_range=(session.get("research") or {}).get("price_range"),
+                notes=[n for n in ((session.get("research") or {}).get("market_note"),
+                                   (session.get("market_research") or {}).get("market_note")) if n],
+                usage={k: (session.get("usage") or {}).get(k) for k in
+                       ("calls", "input_tokens", "output_tokens", "searches", "cost_usd")},
+            )
+            save(session)
+    except Exception:
+        log.exception("report failed")
+        _set_report(session_id, status="failed", error="Something went wrong while making the report. Try again.")
+
+
+def report_status(session: dict) -> dict:
+    report = dict(session.get("report") or {"status": "none"})
+    thread = _reports.get(session["id"])
+    if report.get("status") == "preparing" and not (thread and thread.is_alive()):
+        report.update(status="failed", error="The report was interrupted. Try again.")
+    if report.get("status") == "done":
+        report["stale"] = report.get("fingerprint") != scorer.fingerprint(session)
+    return report
+
+
+@app.get("/api/sessions/{session_id}/report")
+def get_report(session_id: str):
+    return report_status(load(session_id))
+
+
+@app.post("/api/sessions/{session_id}/report")
+def make_report(session_id: str):
+    load(session_id)
+    start_report(session_id)
+    return report_status(load(session_id))
 
 
 @app.get("/")

@@ -9,6 +9,9 @@
   --on-accent: #ffffff;
   --red: #ff3b30;
   --amber: #ff9f0a;
+  --amber-text: #c26a00;
+  --green: #34c759;
+  --green-text: #1f8a3c;
   --radius: 14px;
 }
 
@@ -23,6 +26,9 @@
     --accent: #0a84ff;
     --red: #ff453a;
     --amber: #ff9f0a;
+    --amber-text: #ffb340;
+    --green: #30d158;
+    --green-text: #30d158;
   }
 }
 
@@ -368,3 +374,132 @@ a.edit { text-decoration: none; flex: none; }
 
 /* Keep the last screen's buttons clear of the corner button */
 .main { padding-bottom: 96px; }
+
+/* ---------- Report ---------- */
+.report h2 { font-size: 22px; margin: 36px 0 10px; }
+.report h3 { font-size: 15px; margin: 20px 0 6px; }
+.report p { margin: 8px 0; }
+.muted { color: var(--secondary); }
+.small { font-size: 13px; }
+.good-text { color: var(--green); }
+.bad-text { color: var(--red); }
+
+.verdict {
+  padding: 18px 20px;
+  border-radius: 18px;
+  background: var(--card);
+  border-top: 5px solid var(--amber);
+}
+.verdict.good { border-top-color: var(--green); }
+.verdict.bad { border-top-color: var(--red); }
+.verdict-label { font-size: 13px; font-weight: 600; color: var(--secondary); }
+.verdict-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; margin: 2px 0 6px; }
+.verdict-name { font-size: 32px; font-weight: 700; letter-spacing: -0.01em; }
+.verdict.good .verdict-name { color: var(--green); }
+.verdict.warn .verdict-name { color: var(--amber-text); }
+.verdict.bad .verdict-name { color: var(--red); }
+.verdict-why { font-size: 16px; }
+.pill.confidence { background: var(--fill); color: var(--text); }
+.pill.confidence.low { background: rgba(255, 59, 48, 0.14); }
+.pill.confidence.high { background: rgba(52, 199, 89, 0.18); }
+
+.scorecard { margin-top: 12px; border-radius: var(--radius); background: var(--card); overflow: hidden; }
+.area { border-top: 1px solid var(--separator); }
+.area:first-child { border-top: 0; }
+.area summary {
+  display: grid;
+  grid-template-columns: 112px 64px 1fr;
+  align-items: baseline;
+  gap: 10px;
+  padding: 11px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+.area summary::-webkit-details-marker { display: none; }
+.area summary:hover { background: var(--fill); }
+.area summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.area-name { font-weight: 600; }
+.area-line { font-size: 14px; color: var(--secondary); }
+.rating {
+  justify-self: start;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.rating.good { background: var(--green); color: #fff; }
+.rating.mid { background: var(--fill); color: var(--text); }
+.rating.bad { background: var(--red); color: #fff; }
+.evidence { padding: 0 16px 14px; }
+.signals, .facts { margin: 8px 0 0; padding-left: 0; list-style: none; font-size: 14px; }
+.signals li, .facts li { margin: 6px 0; }
+.sig { display: inline-block; width: 20px; font-weight: 700; }
+.sig.yes { color: var(--green); }
+.sig.no { color: var(--red); }
+.sig.unclear { color: var(--secondary); }
+.src { margin-left: 6px; font-size: 13px; color: var(--accent); text-decoration: none; }
+a.src:hover { text-decoration: underline; }
+
+.tag-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 17px;
+  vertical-align: 1px;
+}
+.tag-chip.verified { background: rgba(52, 199, 89, 0.18); color: var(--green-text); }
+.tag-chip.estimated { background: rgba(255, 159, 10, 0.2); color: var(--amber-text); }
+.tag-chip.assumed { background: var(--fill); color: var(--secondary); }
+.figure { white-space: nowrap; }
+
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+.compare > div { padding: 12px 14px; border-radius: var(--radius); background: var(--card); }
+@media (max-width: 520px) { .compare { grid-template-columns: 1fr; } }
+
+.table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 15px; background: var(--card); border-radius: var(--radius); overflow: hidden; }
+.table th, .table td { padding: 9px 14px; text-align: left; border-top: 1px solid var(--separator); vertical-align: top; }
+.table thead th { border-top: 0; font-size: 12px; color: var(--secondary); font-weight: 600; }
+.table tbody tr:first-child td { border-top: 0; }
+.table thead + tbody tr:first-child td { border-top: 1px solid var(--separator); }
+.table a { color: var(--accent); text-decoration: none; }
+.table.money td:last-child { text-align: right; }
+.table .total td { font-weight: 600; }
+
+.chart { margin-top: 12px; padding: 12px 14px; border-radius: var(--radius); background: var(--card); }
+.bar-row { display: grid; grid-template-columns: 36px 1fr auto; align-items: center; gap: 10px; margin: 6px 0; }
+.bar { height: 14px; border-radius: 4px; }
+.bar.in { background: var(--green); }
+.bar.out { background: var(--red); opacity: 0.8; }
+.bar-label, .bar-value { font-size: 13px; }
+
+.alert-card.resolved { opacity: 0.7; border-left-color: var(--secondary); }
+.pill.fixed { background: var(--fill); color: var(--secondary); margin-left: auto; }
+
+.test-card { padding: 14px 16px; border-radius: var(--radius); background: var(--card); }
+.test-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; }
+.gates { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+@media (max-width: 520px) { .gates { grid-template-columns: 1fr; } }
+.gates ul, .checklist { padding-left: 20px; margin: 4px 0; }
+.gates li, .checklist li { margin: 4px 0; }
+
+.note.stale { margin-bottom: 14px; color: var(--text); }
+.disclaimer { margin-top: 32px; font-size: 13px; color: var(--secondary); }
+.report-actions { margin-top: 12px; }
+
+/* Preparing screen */
+.stages { list-style: none; padding: 0; margin: 24px 0 0; }
+.stages li { display: flex; align-items: center; gap: 12px; padding: 8px 0; color: var(--secondary); }
+.stages li.now { color: var(--text); font-weight: 600; }
+.stages li.done { color: var(--text); }
+.stages .mark { width: 14px; color: var(--green); font-weight: 700; text-align: center; }
+
+/* Keep the verdict and the whole scorecard on the first screen: closed rows show two lines. */
+.area:not([open]) .area-line {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
