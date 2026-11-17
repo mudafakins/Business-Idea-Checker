@@ -5,3 +5,4 @@ reports/*
 !reports/.gitkeep
 .DS_Store
 tests/results-*.json
+PROJECT_BRIEF.md
