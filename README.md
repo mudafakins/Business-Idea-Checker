@@ -41,6 +41,27 @@ Either:
 
 Without either, the form still works with standard wording, but there is no research or report.
 
+## Setting it up on a team member's computer
+
+1. `git clone https://github.com/mudafakins/Business-Idea-Checker.git`
+2. Install [Claude Code](https://claude.com/claude-code), run `claude`, type `/login` and
+   sign in with your own Claude account (the AI calls use your own plan).
+3. In the folder: `./run.sh`
+
+Use `git clone` (not a ZIP download) so automatic updates work.
+
+## Updates
+
+The app keeps itself up to date with this repository:
+
+- `./run.sh` pulls the latest pushed version each time it starts.
+- While it is open, it checks every 30 minutes and shows **Update now** when a newer
+  version has been pushed. Updating installs any new packages and restarts the app.
+- It never overwrites local edits to the app's files, and waits if a check is running.
+  Saved reports and `.env` are never touched.
+
+To release an update, commit and `git push` (tag it, e.g. `git tag v1.4`, to give it a name).
+
 ## Where things are saved
 
 Every run is saved in `reports/` as JSON, plus a standalone HTML copy of each finished
